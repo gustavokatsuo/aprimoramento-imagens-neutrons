@@ -1,9 +1,5 @@
 # Aprimoramento de Imagens para Tomografia com Nêutrons Utilizando Deep Learning
 
-[![Python](https://img.shields.io/badge/Python-3.12+-blue.svg)](https://www.python.org/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.8+-ee4c2c.svg)](https://pytorch.org/)
-[![Licença](https://img.shields.io/badge/Licen%C3%A7a-MIT-green.svg)](LICENSE)
-
 Este repositório contém o código-fonte, protótipos e documentação referentes ao projeto de Iniciação Científica focado na restauração e aprimoramento de imagens obtidas por tomografia com nêutrons (NT). 
 
 O projeto visa superar as limitações de capacidade de generalização de algoritmos clássicos de filtragem (como o BM3D) perante ruídos e distorções complexas, estruturando uma metodologia baseada em Inteligência Artificial para o sistema de imageamento do Reator Multipropósito Brasileiro (RMB).
@@ -26,7 +22,7 @@ A função de perda (*Loss*) combina a perda de conteúdo (garantindo que os det
 
 ## Estrutura do Repositório
 
-\`\`\`text
+\`\`\`
 aprimoramento-imagens-neutrons/
 ├── data/                   # Ficheiros de dados (não versionados)
 │   ├── raw/                # Radiografias originais
@@ -65,7 +61,7 @@ Para executar este projeto localmente, é recomendável a utilização de um amb
 
 ## Como Executar
 
-### 1. Treino do Modelo
+### Treino do Modelo
 O treino e a experimentação inicial da SRGAN podem ser reproduzidos através do Jupyter Notebook disponibilizado:
 * Abre e executa o arquivo `notebooks/arquitetura_ic.ipynb`.
 * No final do treino, os pesos do modelo serão guardados automaticamente num arquivo chamado `srgan_generator.pth`.
