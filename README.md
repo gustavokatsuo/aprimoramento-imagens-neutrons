@@ -22,7 +22,7 @@ A função de perda (*Loss*) combina a perda de conteúdo (garantindo que os det
 
 ## Estrutura do Repositório
 
-\`\`\`
+```
 aprimoramento-imagens-neutrons/
 ├── data/                   # Ficheiros de dados (não versionados)
 │   ├── raw/                # Radiografias originais
@@ -37,7 +37,7 @@ aprimoramento-imagens-neutrons/
 │   └── train.py            
 ├── requirements.txt        # Dependências do projeto
 └── README.md               # Este arquivo
-\`\`\`
+```
 
 ---
 
@@ -46,15 +46,15 @@ aprimoramento-imagens-neutrons/
 Para executar este projeto localmente, é recomendável a utilização de um ambiente virtual (como `venv` ou `conda`) com suporte para aceleração por GPU (CUDA).
 
 1. **Clonar o repositório:**
-   \`\`\`bash
+   ```bash
    git clone https://github.com/gustavokatsuo/aprimoramento-imagens-neutrons.git
    cd aprimoramento-imagens-neutrons
-   \`\`\`
+   ```
 
 2. **Instalar as dependências:**
-   \`\`\`bash
+   ```bash
    pip install -r requirements.txt
-   \`\`\`
+   ```
    *(Certifique-se de que as bibliotecas `torch` e `torchvision` estão configuradas corretamente para a sua versão do CUDA).*
 
 ---
