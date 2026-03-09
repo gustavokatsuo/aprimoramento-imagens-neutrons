@@ -1,0 +1,24 @@
+# Ficheiros de dados (Imagens, radiografias, etc.)
+data/
+!data/.gitkeep
+
+# Pesos do modelo PyTorch
+*.pth
+*.pt
+
+# Ficheiros temporários do Jupyter Notebook / Colab
+.ipynb_checkpoints/
+
+# Ficheiros de cache do Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Ambientes Virtuais (se usares no futuro)
+venv/
+env/
+.env
+
+# Ficheiros de sistema operativo
+.DS_Store
+Thumbs.db
