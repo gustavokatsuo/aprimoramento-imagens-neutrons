@@ -2,14 +2,14 @@ import torch
 import torch.nn as nn
 from torchvision.models import vgg19, VGG19_Weights
 
-# --- Extrator de Características (para a Content Loss) ---
+# --- Extrator de Características (Otimizado para Radiografias) ---
 class FeatureExtractorVGG(nn.Module):
     def __init__(self):
         super(FeatureExtractorVGG, self).__init__()
-        # Usando a sintaxe atualizada do PyTorch para carregar pesos da ImageNet
         vgg19_model = vgg19(weights=VGG19_Weights.DEFAULT)
-        # Extrai até a camada 36 para capturar características estruturais profundas
-        self.feature_extractor = nn.Sequential(*list(vgg19_model.features.children())[:36]).eval()
+        # Modo Pro: Extrai apenas até a camada 18 (relu3_4) 
+        # Preserva melhor texturas e bordas estruturais de materiais, ignorando semântica profunda
+        self.feature_extractor = nn.Sequential(*list(vgg19_model.features.children())[:18]).eval()
         
         for param in self.feature_extractor.parameters():
             param.requires_grad = False
@@ -18,13 +18,11 @@ class FeatureExtractorVGG(nn.Module):
         self.register_buffer("std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
 
     def forward(self, img):
-        # Converte radiografia (1 canal) para RGB (3 canais) para a VGG
         img_rgb = img.repeat(1, 3, 1, 1)
-        # Normalização padrão ImageNet
         img_norm = (img_rgb - self.mean) / self.std
         return self.feature_extractor(img_norm)
 
-# --- Bloco Residual (usado no Gerador) ---
+# --- Bloco Residual ---
 class ResidualBlock(nn.Module):
     def __init__(self, channels):
         super(ResidualBlock, self).__init__()
@@ -39,35 +37,48 @@ class ResidualBlock(nn.Module):
     def forward(self, x):
         return x + self.block(x)
 
-# --- Gerador (SRResNet/SRGAN) ---
+# --- Gerador (SRResNet com Upsampling 4x) ---
 class Generator(nn.Module):
     def __init__(self, in_channels=1, out_channels=1, num_res_blocks=16):
         super(Generator, self).__init__()
-        # Camada Inicial
+        
         self.initial = nn.Sequential(
             nn.Conv2d(in_channels, 64, kernel_size=9, stride=1, padding=4),
             nn.PReLU()
         )
-        # Blocos Residuais
+        
         self.res_blocks = nn.Sequential(*[ResidualBlock(64) for _ in range(num_res_blocks)])
-        # Camada Intermediária
+        
         self.middle = nn.Sequential(
             nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(64)
         )
-        # Camada Final (Restauração da imagem)
+        
+        # Modo Pro: Blocos de Upsampling (PixelShuffle) para escalar 4x (2x e depois 2x)
+        self.upsampling = nn.Sequential(
+            nn.Conv2d(64, 256, kernel_size=3, stride=1, padding=1),
+            nn.PixelShuffle(2), # Transforma 256 canais em 64 canais com 2x a resolução espacial
+            nn.PReLU(),
+            nn.Conv2d(64, 256, kernel_size=3, stride=1, padding=1),
+            nn.PixelShuffle(2), # Transforma 256 canais em 64 canais com +2x a resolução espacial
+            nn.PReLU()
+        )
+        
         self.final = nn.Sequential(
             nn.Conv2d(64, out_channels, kernel_size=9, stride=1, padding=4),
-            nn.Tanh() # Saída entre -1 e 1
+            nn.Tanh()
         )
 
     def forward(self, x):
         initial = self.initial(x)
         x = self.res_blocks(initial)
         x = self.middle(x)
-        return self.final(x + initial)
+        # Skip connection ocorre ANTES do upsampling
+        x = x + initial 
+        x = self.upsampling(x)
+        return self.final(x)
 
-# --- Discriminador ---
+# --- Discriminador (Patch/Logit) ---
 class Discriminator(nn.Module):
     def __init__(self, in_channels=1):
         super(Discriminator, self).__init__()
@@ -90,8 +101,8 @@ class Discriminator(nn.Module):
             nn.Flatten(),
             nn.Linear(256, 1024),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Linear(1024, 1),
-            nn.Sigmoid() # Probabilidade de ser real (0 a 1)
+            nn.Linear(1024, 1)
+            # Sigmoid removida para uso de BCEWithLogitsLoss no treino!
         )
 
     def forward(self, img):

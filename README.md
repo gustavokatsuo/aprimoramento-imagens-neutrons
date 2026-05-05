@@ -32,9 +32,11 @@ aprimoramento-imagens-neutrons/
 ├── notebooks/              # Exploração de dados e prototipagem
 │   └── arquitetura_ic.ipynb # Notebook principal de treino da SRGAN
 ├── src/                    # Código-fonte modularizado
+│   ├── __init__.py  
 │   ├── data_loader.py      
 │   ├── model.py            
-│   └── train.py            
+│   └── train.py
+│   └── utils.py 
 ├── requirements.txt        # Dependências do projeto
 └── README.md               # Este arquivo
 ```
