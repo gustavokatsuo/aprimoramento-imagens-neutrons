@@ -46,7 +46,7 @@ def save_samples(epoch, lr_imgs, hr_imgs, fake_imgs, save_dir="samples"):
     comparison = torch.cat((lr_resized[0:1], fake_imgs[0:1], hr_imgs[0:1]), 3)
     
     save_path = os.path.join(save_dir, f"epoch_{epoch}.png")
-    ssave_image(comparison, save_path, normalize=True, scale_each=True)
+    save_image(comparison, save_path, normalize=True, scale_each=True)
     print(f"Amostras da época {epoch} salvas em {save_path}")
 
 def save_model_weights(generator, discriminator, epoch, save_dir="weights"):
