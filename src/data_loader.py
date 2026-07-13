@@ -167,6 +167,59 @@ class NeutronDataset(Dataset):
 
             return {"lr": tensor_lr, "hr": tensor_hr}
 
+class StepEdgeDataset(Dataset):
+    """
+    Dataset dos phantoms de borda de degrau (step-edge), usados APENAS em
+    validação para medir ESF/LSF/MTF (ver utils.mtf_from_edge) — não entram
+    na loss de treino. Convenção: subdiretório próprio, ex. data/step_edges/.
+
+    Diferente do NeutronDataset, o recorte é CENTRAL e determinístico e não há
+    augmentation: a geometria da borda precisa ser estável entre épocas para
+    que a MTF seja comparável ao longo do treino.
+    """
+    def __init__(self, root_dir="data/step_edges", patch_size=512, lr_scale=4,
+                 fits_normalization="minmax", fits_range=None):
+        self.files = sorted(
+            f for ext in SUPPORTED_EXTENSIONS
+            for f in glob.glob(os.path.join(root_dir, ext))
+        )
+        self.patch_size = patch_size
+        self.lr_scale = lr_scale
+        self.fits_normalization = fits_normalization
+        self.fits_range = fits_range
+        self.normalize = transforms.Normalize(mean=[0.5], std=[0.5])
+
+    def __len__(self):
+        return len(self.files)
+
+    def __getitem__(self, idx):
+        img_path = self.files[idx]
+        img_array = load_image_as_array(
+            img_path, self.fits_normalization, self.fits_range
+        )
+        img = torch.from_numpy(img_array).unsqueeze(0)
+
+        # Recorte central, limitado ao tamanho da imagem e múltiplo de lr_scale
+        _, h, w = img.shape
+        crop = min(self.patch_size, h, w)
+        crop -= crop % self.lr_scale
+        img_hr = TF.center_crop(img, (crop, crop))
+
+        # Mesma degradação do treino, para avaliar a MTF na mesma condição
+        lr_size = crop // self.lr_scale
+        img_lr = TF.gaussian_blur(img_hr, kernel_size=3)
+        img_lr = TF.resize(
+            img_lr, (lr_size, lr_size),
+            interpolation=transforms.InterpolationMode.BICUBIC,
+            antialias=True,
+        ).clamp(0.0, 1.0)
+
+        return {
+            "lr": self.normalize(img_lr),
+            "hr": self.normalize(img_hr),
+            "name": os.path.basename(img_path),
+        }
+
 def get_dataloader(root_dir, batch_size=8, shuffle=True, num_workers=4,
                    patch_size=256, lr_scale=4,
                    fits_normalization="minmax", fits_range=None):
@@ -175,3 +228,16 @@ def get_dataloader(root_dir, batch_size=8, shuffle=True, num_workers=4,
                              fits_range=fits_range)
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,
                       num_workers=num_workers, drop_last=True)
+
+def get_step_edge_loader(root_dir="data/step_edges", patch_size=512, lr_scale=4,
+                         num_workers=0, fits_normalization="minmax", fits_range=None):
+    """
+    Loader de validação dos phantoms de borda. Retorna None se o diretório não
+    existir ou estiver vazio (o treino segue normalmente sem a validação MTF).
+    """
+    dataset = StepEdgeDataset(root_dir, patch_size=patch_size, lr_scale=lr_scale,
+                              fits_normalization=fits_normalization,
+                              fits_range=fits_range)
+    if len(dataset) == 0:
+        return None
+    return DataLoader(dataset, batch_size=1, shuffle=False, num_workers=num_workers)

@@ -10,10 +10,11 @@ import torch.optim as optim
 
 # Importações dos seus módulos locais
 from src.model import Generator, Discriminator, FeatureExtractorVGG
-from src.data_loader import get_dataloader
+from src.data_loader import get_dataloader, get_step_edge_loader
 from src.utils import (calculate_psnr, calculate_ssim, save_samples,
                        save_model_weights, save_checkpoint, load_checkpoint,
-                       log_epoch_csv, denormalize)
+                       log_epoch_csv, denormalize, mtf_from_edge,
+                       cutoff_frequency)
 
 def parse_args():
     """
@@ -49,6 +50,8 @@ def parse_args():
     parser.add_argument("--log-file", type=str, default="logs/training_log.csv",
                         help="CSV append-only com as métricas por época")
     parser.add_argument("--weights-dir", type=str, default="weights")
+    parser.add_argument("--step-edge-dir", type=str, default="data/step_edges",
+                        help="Pasta com phantoms de borda para validação MTF (opcional)")
     parser.add_argument("--fits-normalization", type=str, default="minmax",
                         choices=["minmax", "range", "none"],
                         help="Normalização para arquivos .fits (ver data_loader.load_image_as_array)")
@@ -64,6 +67,46 @@ def set_seed(seed):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+def validate_step_edges(generator, loader, device, epoch, log_path="logs/step_edge_mtf.csv"):
+    """
+    Validação com os phantoms de borda: mede a frequência de corte (MTF10) da
+    imagem super-resolvida vs. da imagem HR de referência. Esses valores,
+    registrados por época, mostram se o ganho de resolução é REAL (ver
+    docs/resolution_metrics.md). Erros em um phantom individual não
+    interrompem o treino.
+    """
+    generator.eval()
+    with torch.no_grad():
+        for batch in loader:
+            imgs_lr = batch["lr"].to(device)
+            imgs_hr = batch["hr"].to(device)
+            name = batch["name"][0]
+
+            gen_hr = generator(imgs_lr)
+
+            sr_img = denormalize(gen_hr).clamp(0, 1).squeeze().cpu().numpy()
+            hr_img = denormalize(imgs_hr).clamp(0, 1).squeeze().cpu().numpy()
+
+            try:
+                freq_sr, mtf_sr = mtf_from_edge(sr_img)
+                freq_hr, mtf_hr = mtf_from_edge(hr_img)
+                fc_sr = cutoff_frequency(freq_sr, mtf_sr)
+                fc_hr = cutoff_frequency(freq_hr, mtf_hr)
+            except ValueError as e:
+                print(f"[Bordas] Falha ao medir MTF de '{name}': {e}")
+                continue
+
+            psnr_sr = calculate_psnr(gen_hr, imgs_hr).item()
+            log_epoch_csv(log_path, {
+                "epoch": epoch,
+                "sample": name,
+                "mtf10_sr": f"{fc_sr:.4f}",
+                "mtf10_hr": f"{fc_hr:.4f}",
+                "psnr_sr": f"{psnr_sr:.3f}",
+            })
+            print(f"[Bordas] {name}: MTF10 SR={fc_sr:.3f} ciclos/px | HR={fc_hr:.3f} ciclos/px")
+    generator.train()
 
 def train(args):
     # --- 1. Configurações e Hiperparâmetros ---
@@ -97,6 +140,14 @@ def train(args):
                                 patch_size=args.patch_size, lr_scale=args.lr_scale,
                                 fits_normalization=args.fits_normalization,
                                 fits_range=args.fits_range)
+
+    # Phantoms de borda (opcional): usados só em validação MTF, nunca na loss
+    step_edge_loader = get_step_edge_loader(args.step_edge_dir,
+                                            lr_scale=args.lr_scale,
+                                            fits_normalization=args.fits_normalization,
+                                            fits_range=args.fits_range)
+    if step_edge_loader is not None:
+        print(f"Validação de bordas ativa: {len(step_edge_loader.dataset)} phantom(s) em '{args.step_edge_dir}'")
 
     # --- Retomada de checkpoint (opcional) ---
     start_epoch = 0
@@ -237,6 +288,8 @@ def train(args):
         if (epoch + 1) % args.sample_interval == 0 or epoch == 0:
             save_samples(epoch, imgs_lr, imgs_hr, gen_hr)
             save_model_weights(generator, discriminator, epoch, save_dir=args.weights_dir)
+            if step_edge_loader is not None:
+                validate_step_edges(generator, step_edge_loader, device, epoch)
 
 if __name__ == "__main__":
     train(parse_args())
