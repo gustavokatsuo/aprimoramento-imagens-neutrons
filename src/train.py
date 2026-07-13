@@ -22,7 +22,10 @@ def parse_args():
     parser.add_argument("--data-dir", type=str, default="data/raw",
                         help="Pasta com as radiografias de treino (TIFF 16-bit, FITS, PNG, JPG)")
     parser.add_argument("--epochs", type=int, default=100,
-                        help="Número de épocas de treinamento")
+                        help="Número TOTAL de épocas (pré-treino + adversarial)")
+    parser.add_argument("--pretrain-epochs", type=int, default=5,
+                        help="Épocas iniciais só com loss de conteúdo MSE pixel-a-pixel "
+                             "(protocolo SRGAN, Ledig et al. 2017); 0 desativa")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-4,
                         help="Taxa de aprendizado padrão para SRGAN")
@@ -32,6 +35,8 @@ def parse_args():
                         help="Fator de super-resolução (deve casar com o Gerador: 4x)")
     parser.add_argument("--adv-weight", type=float, default=1e-3,
                         help="Peso da GAN loss na perda total do Gerador")
+    parser.add_argument("--grad-clip", type=float, default=0.0,
+                        help="Norma máxima do gradiente (0 = sem clipping)")
     parser.add_argument("--seed", type=int, default=42,
                         help="Semente para reprodutibilidade")
     parser.add_argument("--num-workers", type=int, default=4)
@@ -88,6 +93,10 @@ def train(args):
 
     # --- 5. Loop de Treinamento ---
     for epoch in range(args.epochs):
+        # Fase de pré-treino: só a content loss (MSE) treina o Gerador, sem
+        # Discriminador — evita que o D domine antes do G aprender o básico
+        pretraining = epoch < args.pretrain_epochs
+
         for i, batch in enumerate(dataloader):
             # Move as imagens para a GPU
             imgs_lr = batch["lr"].to(device)
@@ -105,41 +114,55 @@ def train(args):
             # Gera uma imagem de alta resolução a partir da baixa
             gen_hr = generator(imgs_lr)
 
-            # Adversarial Loss: O gerador quer que o discriminador ache que a gen_hr é 'valid' (1)
-            pred_fake = discriminator(gen_hr)
-            loss_GAN = criterion_GAN(pred_fake, valid)
+            if pretraining:
+                # Pré-treino: MSE pixel-a-pixel direto (sem VGG, sem adversarial)
+                loss_content = criterion_content(gen_hr, imgs_hr)
+                loss_GAN = torch.zeros((), device=device)
+                loss_G = loss_content
+            else:
+                # Adversarial Loss: O gerador quer que o discriminador ache que a gen_hr é 'valid' (1)
+                pred_fake = discriminator(gen_hr)
+                loss_GAN = criterion_GAN(pred_fake, valid)
 
-            # Content Loss: Compara as características da VGG da imagem gerada vs real.
-            # CORREÇÃO: a VGG espera entrada em [0, 1] (estatísticas ImageNet),
-            # mas gen_hr/imgs_hr estão em [-1, 1] — denormalize antes de extrair
-            gen_features = feature_extractor(denormalize(gen_hr))
-            real_features = feature_extractor(denormalize(imgs_hr))
-            loss_content = criterion_content(gen_features, real_features.detach())
+                # Content Loss: Compara as características da VGG da imagem gerada vs real.
+                # CORREÇÃO: a VGG espera entrada em [0, 1] (estatísticas ImageNet),
+                # mas gen_hr/imgs_hr estão em [-1, 1] — denormalize antes de extrair
+                gen_features = feature_extractor(denormalize(gen_hr))
+                real_features = feature_extractor(denormalize(imgs_hr))
+                loss_content = criterion_content(gen_features, real_features.detach())
 
-            # Perda Total do Gerador (Peso de 1e-3 para a GAN Loss estabiliza o treino)
-            loss_G = loss_content + args.adv_weight * loss_GAN
+                # Perda Total do Gerador (Peso de 1e-3 para a GAN Loss estabiliza o treino)
+                loss_G = loss_content + args.adv_weight * loss_GAN
 
             loss_G.backward()
+            if args.grad_clip > 0:
+                nn.utils.clip_grad_norm_(generator.parameters(), args.grad_clip)
             optimizer_G.step()
 
             # -----------------------------
             # Treinamento do Discriminador (D)
             # -----------------------------
-            optimizer_D.zero_grad()
+            if pretraining:
+                # D não é atualizado no pré-treino
+                loss_D = torch.zeros(())
+            else:
+                optimizer_D.zero_grad()
 
-            # Avalia as imagens reais
-            pred_real = discriminator(imgs_hr)
-            loss_real = criterion_GAN(pred_real, valid)
+                # Avalia as imagens reais
+                pred_real = discriminator(imgs_hr)
+                loss_real = criterion_GAN(pred_real, valid)
 
-            # Avalia as imagens falsas geradas (usando detach para não atualizar o Gerador aqui)
-            pred_fake = discriminator(gen_hr.detach())
-            loss_fake = criterion_GAN(pred_fake, fake)
+                # Avalia as imagens falsas geradas (usando detach para não atualizar o Gerador aqui)
+                pred_fake = discriminator(gen_hr.detach())
+                loss_fake = criterion_GAN(pred_fake, fake)
 
-            # Perda Média do Discriminador
-            loss_D = (loss_real + loss_fake) / 2
+                # Perda Média do Discriminador
+                loss_D = (loss_real + loss_fake) / 2
 
-            loss_D.backward()
-            optimizer_D.step()
+                loss_D.backward()
+                if args.grad_clip > 0:
+                    nn.utils.clip_grad_norm_(discriminator.parameters(), args.grad_clip)
+                optimizer_D.step()
 
             # --- 6. Logs e Métricas ---
             if i % 10 == 0:
@@ -147,7 +170,8 @@ def train(args):
                 with torch.no_grad():
                     current_psnr = calculate_psnr(gen_hr, imgs_hr).item()
 
-                print(f"[Época {epoch}/{args.epochs}] [Batch {i}/{len(dataloader)}] "
+                phase = "PRÉ" if pretraining else "GAN"
+                print(f"[{phase}][Época {epoch}/{args.epochs}] [Batch {i}/{len(dataloader)}] "
                       f"[D loss: {loss_D.item():.4f}] [G loss: {loss_G.item():.4f}] "
                       f"[PSNR: {current_psnr:.2f} dB]")
 
