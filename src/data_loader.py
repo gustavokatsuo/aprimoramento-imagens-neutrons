@@ -19,37 +19,49 @@ class NeutronDataset(Dataset):
         self.files = sorted(glob.glob(os.path.join(root_dir, "*.tiff")) + 
                            glob.glob(os.path.join(root_dir, "*.png")) +
                            glob.glob(os.path.join(root_dir, "*.jpg")))
-        
+
         self.patch_size = patch_size
         self.lr_scale = lr_scale
+
+        # Normalize transforma [0, 1] em [-1, 1] (domínio do Tanh do Gerador)
+        self.normalize = transforms.Normalize(mean=[0.5], std=[0.5])
 
     def __len__(self):
         return len(self.files)
 
     def __getitem__(self, idx):
             img_path = self.files[idx]
-            
+
             # Leitura científica do TIFF de 16-bits
             if img_path.endswith('.tiff') or img_path.endswith('.tif'):
                 img_array = tifffile.imread(img_path)
-                
+
                 # Se a imagem tiver mais de 2 dimensões (ex: RGBA), pega só o canal de cinza
                 if len(img_array.shape) > 2:
                     img_array = img_array[:, :, 0]
-                    
+
                 # Converte de 16-bit (0 a 65535) para float32 no intervalo [0, 1]
                 img_array = img_array.astype(np.float32) / 65535.0
-                
-                # Converte Numpy para PIL Image para poder usar o torchvision transforms
-                img = TF.to_pil_image(img_array)
             else:
                 # Fallback para imagens comuns caso você coloque um .jpg de teste
                 img = Image.open(img_path).convert("L")
-            
+                img_array = np.asarray(img, dtype=np.float32) / 255.0
+
+            # Conversão DIRETA numpy -> tensor (1, H, W), preservando float32.
+            # NÃO usar TF.to_pil_image aqui: para arrays float ele converte para
+            # PIL modo 'L' (8 bits), quantizando os 65536 níveis do uint16 em
+            # apenas 256 — destruindo a precisão radiométrica do detector.
+            img = torch.from_numpy(img_array).unsqueeze(0)
+
             # --- 1. Ajuste de Tamanho ---
-            w, h = img.size
+            _, h, w = img.shape
             if w < self.patch_size or h < self.patch_size:
-                img = TF.resize(img, (max(h, self.patch_size), max(w, self.patch_size)))
+                img = TF.resize(
+                    img,
+                    (max(h, self.patch_size), max(w, self.patch_size)),
+                    interpolation=transforms.InterpolationMode.BICUBIC,
+                    antialias=True,
+                ).clamp(0.0, 1.0)
 
             # --- 2. Extração de Patch Aleatório ---
             i, j, h_crop, w_crop = transforms.RandomCrop.get_params(
@@ -59,22 +71,23 @@ class NeutronDataset(Dataset):
 
             # --- 3. Data Augmentation Científico ---
             if random.random() > 0.5:
-                img_hr = TF.hflip(img_hr) 
+                img_hr = TF.hflip(img_hr)
             if random.random() > 0.5:
-                img_hr = TF.vflip(img_hr) 
+                img_hr = TF.vflip(img_hr)
 
             # --- 4. Degradação Realista ---
             lr_size = self.patch_size // self.lr_scale
             img_lr = TF.gaussian_blur(img_hr, kernel_size=3)
-            img_lr = TF.resize(img_lr, (lr_size, lr_size), interpolation=transforms.InterpolationMode.BICUBIC)
+            img_lr = TF.resize(
+                img_lr, (lr_size, lr_size),
+                interpolation=transforms.InterpolationMode.BICUBIC,
+                antialias=True,
+            ).clamp(0.0, 1.0)  # bicúbico pode ter overshoot fora de [0, 1]
 
-            # --- 5. Transformação em Tensores ---
-            # Como as imagens de 16-bit já estão no intervalo [0, 1] internamente pelo to_pil_image
-            to_tensor = transforms.ToTensor()
-            normalize = transforms.Normalize(mean=[0.5], std=[0.5]) # Transforma [0, 1] para [-1, 1]
-
-            tensor_hr = normalize(to_tensor(img_hr))
-            tensor_lr = normalize(to_tensor(img_lr))
+            # --- 5. Normalização para o domínio do modelo ---
+            # Os tensores já estão em [0, 1]; Normalize leva para [-1, 1]
+            tensor_hr = self.normalize(img_hr)
+            tensor_lr = self.normalize(img_lr)
 
             return {"lr": tensor_lr, "hr": tensor_hr}
 
