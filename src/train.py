@@ -7,7 +7,7 @@ import os
 # Importações dos seus módulos locais
 from src.model import Generator, Discriminator, FeatureExtractorVGG
 from src.data_loader import get_dataloader
-from src.utils import calculate_psnr, save_samples, save_model_weights
+from src.utils import calculate_psnr, save_samples, save_model_weights, denormalize
 
 def train():
     # --- 1. Configurações e Hiperparâmetros ---
@@ -65,9 +65,11 @@ def train():
             pred_fake = discriminator(gen_hr)
             loss_GAN = criterion_GAN(pred_fake, valid)
             
-            # Content Loss: Compara as características da VGG da imagem gerada vs real
-            gen_features = feature_extractor(gen_hr)
-            real_features = feature_extractor(imgs_hr)
+            # Content Loss: Compara as características da VGG da imagem gerada vs real.
+            # CORREÇÃO: a VGG espera entrada em [0, 1] (estatísticas ImageNet),
+            # mas gen_hr/imgs_hr estão em [-1, 1] — denormalize antes de extrair
+            gen_features = feature_extractor(denormalize(gen_hr))
+            real_features = feature_extractor(denormalize(imgs_hr))
             loss_content = criterion_content(gen_features, real_features.detach())
             
             # Perda Total do Gerador (Peso de 1e-3 para a GAN Loss estabiliza o treino)

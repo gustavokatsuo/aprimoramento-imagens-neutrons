@@ -18,6 +18,10 @@ class FeatureExtractorVGG(nn.Module):
         self.register_buffer("std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
 
     def forward(self, img):
+        # ATENÇÃO: 'img' DEVE estar no intervalo [0, 1] — as estatísticas
+        # mean/std da ImageNet pressupõem esse domínio. Como o pipeline de
+        # treino trabalha em [-1, 1] (Tanh do Gerador / Normalize do dataset),
+        # o chamador precisa desnormalizar antes (ver utils.denormalize).
         img_rgb = img.repeat(1, 3, 1, 1)
         img_norm = (img_rgb - self.mean) / self.std
         return self.feature_extractor(img_norm)
