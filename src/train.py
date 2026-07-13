@@ -11,7 +11,7 @@ import torch.optim as optim
 from src.model import Generator, Discriminator, FeatureExtractorVGG
 from src.data_loader import get_dataloader
 from src.utils import (calculate_psnr, save_samples, save_model_weights,
-                       denormalize)
+                       save_checkpoint, load_checkpoint, denormalize)
 
 def parse_args():
     """
@@ -40,8 +40,11 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42,
                         help="Semente para reprodutibilidade")
     parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--resume", type=str, default=None,
+                        help="Caminho de um checkpoint salvo (weights/checkpoint_last.pth) para retomar")
     parser.add_argument("--sample-interval", type=int, default=5,
                         help="Intervalo (épocas) para salvar amostras, pesos e validação de bordas")
+    parser.add_argument("--weights-dir", type=str, default="weights")
     parser.add_argument("--fits-normalization", type=str, default="minmax",
                         choices=["minmax", "range", "none"],
                         help="Normalização para arquivos .fits (ver data_loader.load_image_as_array)")
@@ -91,8 +94,14 @@ def train(args):
                                 fits_normalization=args.fits_normalization,
                                 fits_range=args.fits_range)
 
+    # --- Retomada de checkpoint (opcional) ---
+    start_epoch = 0
+    if args.resume:
+        start_epoch = load_checkpoint(args.resume, generator, discriminator,
+                                      optimizer_G, optimizer_D, device)
+
     # --- 5. Loop de Treinamento ---
-    for epoch in range(args.epochs):
+    for epoch in range(start_epoch, args.epochs):
         # Fase de pré-treino: só a content loss (MSE) treina o Gerador, sem
         # Discriminador — evita que o D domine antes do G aprender o básico
         pretraining = epoch < args.pretrain_epochs
@@ -176,10 +185,14 @@ def train(args):
                       f"[PSNR: {current_psnr:.2f} dB]")
 
         # --- 7. Checkpoints (Fim de cada época) ---
+        # Checkpoint retomável (modelos + otimizadores + época + RNG) toda época
+        save_checkpoint(os.path.join(args.weights_dir, "checkpoint_last.pth"),
+                        epoch, generator, discriminator, optimizer_G, optimizer_D)
+
         # Salva amostras visuais e os pesos do modelo
         if (epoch + 1) % args.sample_interval == 0 or epoch == 0:
             save_samples(epoch, imgs_lr, imgs_hr, gen_hr)
-            save_model_weights(generator, discriminator, epoch)
+            save_model_weights(generator, discriminator, epoch, save_dir=args.weights_dir)
 
 if __name__ == "__main__":
     train(parse_args())

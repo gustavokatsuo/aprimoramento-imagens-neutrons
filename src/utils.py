@@ -2,6 +2,7 @@ import torch
 import numpy as np
 from torchvision.utils import save_image
 import os
+import random
 
 def denormalize(tensors):
     """
@@ -65,3 +66,54 @@ def save_model_weights(generator, discriminator, epoch, save_dir="weights"):
     # Correção do typo 'state_state_dict' -> 'state_dict'
     torch.save(generator.state_dict(), os.path.join(save_dir, f"gen_epoch_{epoch}.pth"))
     torch.save(discriminator.state_dict(), os.path.join(save_dir, f"disc_epoch_{epoch}.pth"))
+
+def save_checkpoint(path, epoch, generator, discriminator, optimizer_G, optimizer_D):
+    """
+    Salva um checkpoint COMPLETO e retomável do treinamento: modelos, otimizadores,
+    época atual e estado dos geradores de números aleatórios (RNG). Diferente de
+    save_model_weights (que serve apenas para inferência), este permite retomar
+    o treino exatamente de onde parou via --resume.
+    """
+    save_dir = os.path.dirname(path)
+    if save_dir and not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+
+    state = {
+        "epoch": epoch,
+        "generator": generator.state_dict(),
+        "discriminator": discriminator.state_dict(),
+        "optimizer_G": optimizer_G.state_dict(),
+        "optimizer_D": optimizer_D.state_dict(),
+        "rng": {
+            "torch": torch.get_rng_state(),
+            "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+            "numpy": np.random.get_state(),
+            "python": random.getstate(),
+        },
+    }
+    torch.save(state, path)
+
+def load_checkpoint(path, generator, discriminator, optimizer_G, optimizer_D, device):
+    """
+    Restaura um checkpoint salvo por save_checkpoint e retorna a época em que
+    o treino deve recomeçar (época salva + 1). Também restaura o estado dos RNGs
+    para reprodutibilidade da sequência de dados/augmentation.
+    """
+    # weights_only=False é necessário pois o checkpoint contém estados de RNG (numpy/python)
+    state = torch.load(path, map_location=device, weights_only=False)
+
+    generator.load_state_dict(state["generator"])
+    discriminator.load_state_dict(state["discriminator"])
+    optimizer_G.load_state_dict(state["optimizer_G"])
+    optimizer_D.load_state_dict(state["optimizer_D"])
+
+    rng = state.get("rng")
+    if rng is not None:
+        torch.set_rng_state(rng["torch"].cpu() if hasattr(rng["torch"], "cpu") else rng["torch"])
+        if rng["cuda"] is not None and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all(rng["cuda"])
+        np.random.set_state(rng["numpy"])
+        random.setstate(rng["python"])
+
+    print(f"Checkpoint '{path}' carregado. Retomando da época {state['epoch'] + 1}.")
+    return state["epoch"] + 1
