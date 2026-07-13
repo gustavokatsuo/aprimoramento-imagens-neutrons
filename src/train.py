@@ -1,4 +1,5 @@
 import argparse
+import math
 import os
 import random
 
@@ -10,8 +11,9 @@ import torch.optim as optim
 # Importações dos seus módulos locais
 from src.model import Generator, Discriminator, FeatureExtractorVGG
 from src.data_loader import get_dataloader
-from src.utils import (calculate_psnr, save_samples, save_model_weights,
-                       save_checkpoint, load_checkpoint, denormalize)
+from src.utils import (calculate_psnr, calculate_ssim, save_samples,
+                       save_model_weights, save_checkpoint, load_checkpoint,
+                       log_epoch_csv, denormalize)
 
 def parse_args():
     """
@@ -44,6 +46,8 @@ def parse_args():
                         help="Caminho de um checkpoint salvo (weights/checkpoint_last.pth) para retomar")
     parser.add_argument("--sample-interval", type=int, default=5,
                         help="Intervalo (épocas) para salvar amostras, pesos e validação de bordas")
+    parser.add_argument("--log-file", type=str, default="logs/training_log.csv",
+                        help="CSV append-only com as métricas por época")
     parser.add_argument("--weights-dir", type=str, default="weights")
     parser.add_argument("--fits-normalization", type=str, default="minmax",
                         choices=["minmax", "range", "none"],
@@ -106,6 +110,11 @@ def train(args):
         # Discriminador — evita que o D domine antes do G aprender o básico
         pretraining = epoch < args.pretrain_epochs
 
+        # Acumuladores para o log estruturado por época
+        sums = {"loss_D": 0.0, "loss_G": 0.0, "loss_content": 0.0,
+                "loss_GAN": 0.0, "d_real": 0.0, "d_fake": 0.0, "psnr": 0.0}
+        n_batches = 0
+
         for i, batch in enumerate(dataloader):
             # Move as imagens para a GPU
             imgs_lr = batch["lr"].to(device)
@@ -154,6 +163,8 @@ def train(args):
             if pretraining:
                 # D não é atualizado no pré-treino
                 loss_D = torch.zeros(())
+                d_real_prob = float("nan")
+                d_fake_prob = float("nan")
             else:
                 optimizer_D.zero_grad()
 
@@ -173,16 +184,49 @@ def train(args):
                     nn.utils.clip_grad_norm_(discriminator.parameters(), args.grad_clip)
                 optimizer_D.step()
 
-            # --- 6. Logs e Métricas ---
-            if i % 10 == 0:
-                # Calcula o PSNR do batch atual (sem gradientes, para economizar memória)
+                # Probabilidades médias D(real) e D(fake): sinal direto de colapso
+                # (D(real)->1 e D(fake)->0 constantes = D dominando; ambos ~0.5 = equilíbrio)
                 with torch.no_grad():
-                    current_psnr = calculate_psnr(gen_hr, imgs_hr).item()
+                    d_real_prob = torch.sigmoid(pred_real).mean().item()
+                    d_fake_prob = torch.sigmoid(pred_fake).mean().item()
 
+            # --- 6. Logs e Métricas ---
+            with torch.no_grad():
+                current_psnr = calculate_psnr(gen_hr, imgs_hr).item()
+
+            sums["loss_D"] += loss_D.item()
+            sums["loss_G"] += loss_G.item()
+            sums["loss_content"] += loss_content.item()
+            sums["loss_GAN"] += loss_GAN.item()
+            if not math.isnan(d_real_prob):
+                sums["d_real"] += d_real_prob
+                sums["d_fake"] += d_fake_prob
+            sums["psnr"] += current_psnr
+            n_batches += 1
+
+            if i % 10 == 0:
                 phase = "PRÉ" if pretraining else "GAN"
                 print(f"[{phase}][Época {epoch}/{args.epochs}] [Batch {i}/{len(dataloader)}] "
                       f"[D loss: {loss_D.item():.4f}] [G loss: {loss_G.item():.4f}] "
                       f"[PSNR: {current_psnr:.2f} dB]")
+
+        # --- Log estruturado por época (CSV append-only) ---
+        if n_batches > 0:
+            with torch.no_grad():
+                epoch_ssim = calculate_ssim(gen_hr, imgs_hr).item()
+            n_gan = n_batches if not pretraining else 1  # evita divisão por zero
+            log_epoch_csv(args.log_file, {
+                "epoch": epoch,
+                "phase": "pretrain" if pretraining else "gan",
+                "loss_D": f"{sums['loss_D'] / n_batches:.6f}",
+                "loss_G": f"{sums['loss_G'] / n_batches:.6f}",
+                "loss_content": f"{sums['loss_content'] / n_batches:.6f}",
+                "loss_GAN": f"{sums['loss_GAN'] / n_batches:.6f}",
+                "D_real_prob": f"{sums['d_real'] / n_gan:.4f}" if not pretraining else "",
+                "D_fake_prob": f"{sums['d_fake'] / n_gan:.4f}" if not pretraining else "",
+                "psnr": f"{sums['psnr'] / n_batches:.3f}",
+                "ssim_last_batch": f"{epoch_ssim:.4f}",
+            })
 
         # --- 7. Checkpoints (Fim de cada época) ---
         # Checkpoint retomável (modelos + otimizadores + época + RNG) toda época

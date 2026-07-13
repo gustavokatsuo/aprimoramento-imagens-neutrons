@@ -1,7 +1,9 @@
 import torch
 import numpy as np
 from torchvision.utils import save_image
+from torchmetrics.functional.image import structural_similarity_index_measure
 import os
+import csv
 import random
 
 def denormalize(tensors):
@@ -33,6 +35,16 @@ def calculate_psnr(img1, img2):
 
     # MAX_I é implicitamente 1.0 agora
     return 20 * torch.log10(1.0 / torch.sqrt(mse))
+
+def calculate_ssim(img1, img2):
+    """
+    Calcula o Structural Similarity Index (SSIM) via torchmetrics.
+    Espera tensores 4D (B, C, H, W) no domínio do modelo, [-1, 1];
+    desnormaliza para [0, 1] e usa data_range=1.0, coerente com calculate_psnr.
+    """
+    img1_norm = denormalize(img1).clamp(0.0, 1.0)
+    img2_norm = denormalize(img2).clamp(0.0, 1.0)
+    return structural_similarity_index_measure(img1_norm, img2_norm, data_range=1.0)
 
 def save_samples(epoch, lr_imgs, hr_imgs, fake_imgs, save_dir="samples"):
     """
@@ -117,3 +129,20 @@ def load_checkpoint(path, generator, discriminator, optimizer_G, optimizer_D, de
 
     print(f"Checkpoint '{path}' carregado. Retomando da época {state['epoch'] + 1}.")
     return state["epoch"] + 1
+
+def log_epoch_csv(log_path, row):
+    """
+    Registro estruturado (append-only) das métricas de uma época em CSV.
+    'row' é um dicionário; o cabeçalho é escrito apenas na criação do arquivo.
+    Inclui D(real)/D(fake) médios — o sinal direto para diagnosticar colapso da GAN.
+    """
+    log_dir = os.path.dirname(log_path)
+    if log_dir and not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+
+    file_exists = os.path.exists(log_path)
+    with open(log_path, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(row.keys()))
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row)
