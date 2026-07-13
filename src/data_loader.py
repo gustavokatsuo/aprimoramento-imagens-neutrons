@@ -167,6 +167,11 @@ class NeutronDataset(Dataset):
 
             return {"lr": tensor_lr, "hr": tensor_hr}
 
-def get_dataloader(root_dir, batch_size=8, shuffle=True, num_workers=4):
-    dataset = NeutronDataset(root_dir)
-    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers, drop_last=True)
+def get_dataloader(root_dir, batch_size=8, shuffle=True, num_workers=4,
+                   patch_size=256, lr_scale=4,
+                   fits_normalization="minmax", fits_range=None):
+    dataset = NeutronDataset(root_dir, patch_size=patch_size, lr_scale=lr_scale,
+                             fits_normalization=fits_normalization,
+                             fits_range=fits_range)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,
+                      num_workers=num_workers, drop_last=True)
