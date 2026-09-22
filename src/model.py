@@ -2,15 +2,38 @@ import torch
 import torch.nn as nn
 from torchvision.models import vgg19, VGG19_Weights
 
+# Profundidades de extração disponíveis para a content loss. O valor é o fim
+# da fatia em vgg19.features (verificado contra a topologia da rede).
+#
+# A escolha NÃO é neutra: camadas rasas respondem a textura e borda e produzem
+# uma loss de magnitude muito maior; camadas profundas respondem a estrutura
+# semântica e produzem loss pequena. Como a perda total é
+# content_weight * loss_content + adv_weight * loss_GAN, a profundidade
+# determina o peso EFETIVO do termo adversarial — ver docs/resolution_metrics.md
+# e o experimento comparativo descrito no README.
+CAMADAS_VGG = {
+    "relu2_2": 9,    # VGG22 de Ledig et al. (2017)
+    "relu3_4": 18,
+    "relu4_4": 27,
+    "relu5_4": 36,   # VGG54 de Ledig et al. (2017)
+}
+
 # --- Extrator de Características (Otimizado para Radiografias) ---
 class FeatureExtractorVGG(nn.Module):
-    def __init__(self):
+    def __init__(self, camada="relu3_4"):
         super(FeatureExtractorVGG, self).__init__()
+        if camada not in CAMADAS_VGG:
+            raise ValueError(
+                f"camada VGG desconhecida: {camada!r}. "
+                f"Disponíveis: {', '.join(CAMADAS_VGG)}"
+            )
+        self.camada = camada
         vgg19_model = vgg19(weights=VGG19_Weights.DEFAULT)
-        # Modo Pro: Extrai apenas até a camada 18 (relu3_4) 
-        # Preserva melhor texturas e bordas estruturais de materiais, ignorando semântica profunda
-        self.feature_extractor = nn.Sequential(*list(vgg19_model.features.children())[:18]).eval()
-        
+        # relu3_4 (padrão do projeto) preserva texturas e bordas estruturais de
+        # materiais; relu5_4 é o VGG54 do artigo original da SRGAN.
+        fim = CAMADAS_VGG[camada]
+        self.feature_extractor = nn.Sequential(*list(vgg19_model.features.children())[:fim]).eval()
+
         for param in self.feature_extractor.parameters():
             param.requires_grad = False
 
@@ -84,8 +107,32 @@ class Generator(nn.Module):
 
 # --- Discriminador (Patch/Logit) ---
 class Discriminator(nn.Module):
-    def __init__(self, in_channels=1):
+    """
+    Duas variantes:
+
+    "compacto" (padrão do projeto): 6 convoluções até 256 canais, seguidas de
+        AdaptiveAvgPool2d(1). 1,4 M parâmetros.
+
+    "artigo": as 8 convoluções de Ledig et al. (2017), até 512 canais, com
+        cabeça densa sobre um mapa 6x6. 23,6 M parâmetros.
+
+    A diferença de custo é menor do que a de parâmetros sugere: medido em
+    batch 8 / patch 256, a memória de ATIVAÇÃO é praticamente a mesma (712 MB
+    contra 773 MB) — o que cresce são os pesos e os estados do otimizador.
+
+    O AdaptiveAvgPool2d(1) da variante compacta colapsa toda a informação
+    espacial num único valor por canal antes da cabeça densa. Para um
+    discriminador que deve julgar TEXTURA, isso descarta justamente o sinal de
+    interesse; a variante do artigo preserva um mapa 6x6. O pooling adaptativo
+    (em vez do flatten direto do artigo) mantém a rede independente do
+    --patch-size usado no treino.
+    """
+    def __init__(self, in_channels=1, variante="compacto"):
         super(Discriminator, self).__init__()
+        if variante not in ("compacto", "artigo"):
+            raise ValueError(f"variante de Discriminador desconhecida: {variante!r}")
+        self.variante = variante
+
         def discriminator_block(in_f, out_f, stride):
             return nn.Sequential(
                 nn.Conv2d(in_f, out_f, kernel_size=3, stride=stride, padding=1),
@@ -93,21 +140,39 @@ class Discriminator(nn.Module):
                 nn.LeakyReLU(0.2, inplace=True)
             )
 
-        self.model = nn.Sequential(
-            nn.Conv2d(in_channels, 64, kernel_size=3, stride=1, padding=1),
-            nn.LeakyReLU(0.2, inplace=True),
-            discriminator_block(64, 64, 2),
-            discriminator_block(64, 128, 1),
-            discriminator_block(128, 128, 2),
-            discriminator_block(128, 256, 1),
-            discriminator_block(256, 256, 2),
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(),
-            nn.Linear(256, 1024),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Linear(1024, 1)
-            # Sigmoid removida para uso de BCEWithLogitsLoss no treino!
-        )
+        if variante == "compacto":
+            self.model = nn.Sequential(
+                nn.Conv2d(in_channels, 64, kernel_size=3, stride=1, padding=1),
+                nn.LeakyReLU(0.2, inplace=True),
+                discriminator_block(64, 64, 2),
+                discriminator_block(64, 128, 1),
+                discriminator_block(128, 128, 2),
+                discriminator_block(128, 256, 1),
+                discriminator_block(256, 256, 2),
+                nn.AdaptiveAvgPool2d(1),
+                nn.Flatten(),
+                nn.Linear(256, 1024),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.Linear(1024, 1)
+                # Sigmoid removida para uso de BCEWithLogitsLoss no treino!
+            )
+        else:
+            self.model = nn.Sequential(
+                nn.Conv2d(in_channels, 64, kernel_size=3, stride=1, padding=1),
+                nn.LeakyReLU(0.2, inplace=True),
+                discriminator_block(64, 64, 2),
+                discriminator_block(64, 128, 1),
+                discriminator_block(128, 128, 2),
+                discriminator_block(128, 256, 1),
+                discriminator_block(256, 256, 2),
+                discriminator_block(256, 512, 1),
+                discriminator_block(512, 512, 2),
+                nn.AdaptiveAvgPool2d(6),
+                nn.Flatten(),
+                nn.Linear(512 * 6 * 6, 1024),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.Linear(1024, 1)
+            )
 
     def forward(self, img):
         return self.model(img)

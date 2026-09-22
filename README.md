@@ -119,6 +119,9 @@ Argumentos mais usados:
 | `--run-dir` | — | agrupa config, logs, pesos e amostras desta execução |
 | `--resume` | — | retoma de um `checkpoint_last.pth` |
 | `--step-edge-dir` | `data/step_edges` | phantoms para a validação de MTF (opcional) |
+| `--vgg-layer` | `relu3_4` | profundidade da VGG na content loss |
+| `--content-weight` | `1.0` | peso da content loss (`0.006` = rescale do artigo) |
+| `--discriminator` | `compacto` | `compacto` ou `artigo` (Ledig et al. 2017) |
 
 `python -m src.train --help` lista todos.
 
@@ -161,6 +164,46 @@ sbatch --export=ALL,RESUME=runs/<job>/weights/checkpoint_last.pth scripts/train_
 ```
 
 > O script ainda tem placeholders (`<PARTICAO>`, `<CONTA>`, `<N_GPUS>`, `<TEMPO_MAXIMO>`, `<MODULOS>`, `<RAIZ_SCRATCH>`) a preencher com os dados do cluster antes da primeira submissão.
+
+### Experimento: profundidade da VGG e peso do termo adversarial
+
+A perda do Gerador é `content_weight * loss_content + adv_weight * loss_GAN`. A
+magnitude de `loss_content` depende fortemente da profundidade da VGG usada,
+de modo que a camada escolhida determina o peso **efetivo** do termo
+adversarial — isto é, o quanto o treino é de fato uma GAN e não uma SRResNet.
+
+Medido com `adv_weight = 1e-3`, a parcela adversarial na perda total fica:
+
+| `--vgg-layer` | `--content-weight 1.0` | `--content-weight 0.006` |
+|---|---|---|
+| `relu2_2` | 0,005 % | 0,88 % |
+| `relu3_4` *(padrão do projeto)* | 0,013 % | 2,06 % |
+| `relu4_4` | 0,164 % | 21,5 % |
+| `relu5_4` *(VGG54 do artigo)* | 1,100 % | 65,0 % |
+
+As duas configurações de referência, com a mesma semente e os mesmos dados:
+
+```bash
+# configuração histórica do projeto
+python -m src.train --data-dir data/raw --seed 42 \
+    --vgg-layer relu3_4 --content-weight 1.0 \
+    --run-dir runs/vgg-relu3_4
+
+# configuração do artigo (Ledig et al. 2017)
+python -m src.train --data-dir data/raw --seed 42 \
+    --vgg-layer relu5_4 --content-weight 0.006 --discriminator artigo \
+    --run-dir runs/vgg-relu5_4
+```
+
+A comparação se faz pelo `mtf10_sr` de cada execução **contra a coluna
+`mtf10_lr_bicubic`** — que é idêntica nas duas, por ser determinística — e não
+pelas perdas, que não são comparáveis entre objetivos diferentes. O
+`config.json` de cada pasta registra qual código e quais argumentos produziram
+cada número.
+
+> Os valores da tabela acima foram medidos com tensores aleatórios e servem
+> para mostrar a ordem de grandeza do desequilíbrio. Os números com as
+> radiografias reais precisam ser remedidos.
 
 ---
 

@@ -9,7 +9,8 @@ import torch.nn as nn
 import torch.optim as optim
 
 # Importações dos seus módulos locais
-from src.model import Generator, Discriminator, FeatureExtractorVGG
+from src.model import (Generator, Discriminator, FeatureExtractorVGG,
+                       CAMADAS_VGG)
 from src.data_loader import (get_dataloader, get_step_edge_loader,
                              list_supported_images, SUPPORTED_EXTENSIONS)
 from src.utils import (calculate_psnr, calculate_ssim, save_samples,
@@ -41,6 +42,21 @@ def parse_args():
                         help="Fator de super-resolução (deve casar com o Gerador: 4x)")
     parser.add_argument("--adv-weight", type=float, default=1e-3,
                         help="Peso da GAN loss na perda total do Gerador")
+    parser.add_argument("--vgg-layer", type=str, default="relu3_4",
+                        choices=sorted(CAMADAS_VGG),
+                        help="Profundidade da VGG na content loss. relu5_4 é o "
+                             "VGG54 do artigo da SRGAN; camadas rasas produzem "
+                             "loss de magnitude muito maior e reduzem o peso "
+                             "efetivo do termo adversarial")
+    parser.add_argument("--content-weight", type=float, default=1.0,
+                        help="Peso da content loss da VGG. Ledig et al. reescalam "
+                             "as features por 1/12.75, equivalente a 0.006 aqui; "
+                             "1.0 mantém o comportamento histórico do projeto")
+    parser.add_argument("--discriminator", type=str, default="compacto",
+                        choices=["compacto", "artigo"],
+                        help="Arquitetura do Discriminador: 'compacto' (6 convs "
+                             "até 256 canais) ou 'artigo' (8 convs até 512, "
+                             "Ledig et al. 2017)")
     parser.add_argument("--grad-clip", type=float, default=0.0,
                         help="Norma máxima do gradiente (0 = sem clipping)")
     parser.add_argument("--seed", type=int, default=42,
@@ -178,8 +194,10 @@ def train(args):
 
     # --- 2. Inicialização dos Modelos ---
     generator = Generator().to(device)
-    discriminator = Discriminator().to(device)
-    feature_extractor = FeatureExtractorVGG().to(device)
+    discriminator = Discriminator(variante=args.discriminator).to(device)
+    feature_extractor = FeatureExtractorVGG(camada=args.vgg_layer).to(device)
+    print(f"Discriminador '{args.discriminator}' | content loss em "
+          f"VGG {args.vgg_layer} (peso {args.content_weight})", flush=True)
 
     # Múltiplas GPUs no mesmo nó: DataParallel replica os modelos e divide o
     # batch entre elas. É a abordagem usada nos scripts do grupo no Coaraci e
@@ -244,10 +262,14 @@ def train(args):
                                 "step_edge_mtf.csv")
 
     # --- Retomada de checkpoint (opcional) ---
+    # Escolhas que mudam o modelo ou o objetivo viajam com o checkpoint
+    arquitetura = {"discriminator": args.discriminator, "vgg_layer": args.vgg_layer}
+
     start_epoch = 0
     if args.resume:
         start_epoch = load_checkpoint(args.resume, generator, discriminator,
-                                      optimizer_G, optimizer_D, device)
+                                      optimizer_G, optimizer_D, device,
+                                      arquitetura=arquitetura)
 
     # --- 5. Loop de Treinamento ---
     for epoch in range(start_epoch, args.epochs):
@@ -294,8 +316,11 @@ def train(args):
                 real_features = feature_extractor(denormalize(imgs_hr))
                 loss_content = criterion_content(gen_features, real_features.detach())
 
-                # Perda Total do Gerador (Peso de 1e-3 para a GAN Loss estabiliza o treino)
-                loss_G = loss_content + args.adv_weight * loss_GAN
+                # Perda Total do Gerador. O peso EFETIVO do termo adversarial
+                # depende da magnitude da content loss, que por sua vez depende
+                # de --vgg-layer: com relu3_4 e content_weight=1.0 a parcela
+                # adversarial fica na casa de 0,01% da perda total.
+                loss_G = args.content_weight * loss_content + args.adv_weight * loss_GAN
 
             loss_G.backward()
             if args.grad_clip > 0:
@@ -384,7 +409,8 @@ def train(args):
         # --- 7. Checkpoints (Fim de cada época) ---
         # Checkpoint retomável (modelos + otimizadores + época + RNG) toda época
         save_checkpoint(os.path.join(args.weights_dir, "checkpoint_last.pth"),
-                        epoch, generator, discriminator, optimizer_G, optimizer_D)
+                        epoch, generator, discriminator, optimizer_G, optimizer_D,
+                        arquitetura=arquitetura)
 
         # Salva amostras visuais e os pesos do modelo
         if (epoch + 1) % args.sample_interval == 0 or epoch == 0:

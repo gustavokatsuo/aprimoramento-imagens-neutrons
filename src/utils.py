@@ -94,12 +94,17 @@ def save_model_weights(generator, discriminator, epoch, save_dir="weights"):
     torch.save(unwrap(generator).state_dict(), os.path.join(save_dir, f"gen_epoch_{epoch}.pth"))
     torch.save(unwrap(discriminator).state_dict(), os.path.join(save_dir, f"disc_epoch_{epoch}.pth"))
 
-def save_checkpoint(path, epoch, generator, discriminator, optimizer_G, optimizer_D):
+def save_checkpoint(path, epoch, generator, discriminator, optimizer_G, optimizer_D,
+                    arquitetura=None):
     """
     Salva um checkpoint COMPLETO e retomável do treinamento: modelos, otimizadores,
     época atual e estado dos geradores de números aleatórios (RNG). Diferente de
     save_model_weights (que serve apenas para inferência), este permite retomar
     o treino exatamente de onde parou via --resume.
+
+    'arquitetura' guarda as escolhas que mudam o modelo ou o objetivo
+    (variante do Discriminador, camada da VGG) para que load_checkpoint possa
+    recusar uma retomada incompatível com uma mensagem útil.
     """
     save_dir = os.path.dirname(path)
     if save_dir and not os.path.exists(save_dir):
@@ -111,6 +116,7 @@ def save_checkpoint(path, epoch, generator, discriminator, optimizer_G, optimize
         "discriminator": unwrap(discriminator).state_dict(),
         "optimizer_G": optimizer_G.state_dict(),
         "optimizer_D": optimizer_D.state_dict(),
+        "arquitetura": arquitetura,
         "rng": {
             "torch": torch.get_rng_state(),
             "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
@@ -120,7 +126,8 @@ def save_checkpoint(path, epoch, generator, discriminator, optimizer_G, optimize
     }
     torch.save(state, path)
 
-def load_checkpoint(path, generator, discriminator, optimizer_G, optimizer_D, device):
+def load_checkpoint(path, generator, discriminator, optimizer_G, optimizer_D, device,
+                    arquitetura=None):
     """
     Restaura um checkpoint salvo por save_checkpoint e retorna a época em que
     o treino deve recomeçar (época salva + 1). Também restaura o estado dos RNGs
@@ -128,6 +135,26 @@ def load_checkpoint(path, generator, discriminator, optimizer_G, optimizer_D, de
     """
     # weights_only=False é necessário pois o checkpoint contém estados de RNG (numpy/python)
     state = torch.load(path, map_location=device, weights_only=False)
+
+    # Retomar com outra arquitetura daria um erro de state_dict com centenas de
+    # chaves; retomar com outra camada de VGG não daria erro nenhum e mudaria o
+    # experimento em silêncio. Os dois casos são tratados aqui.
+    gravada = state.get("arquitetura")
+    if arquitetura and gravada:
+        if gravada.get("discriminator") != arquitetura.get("discriminator"):
+            raise ValueError(
+                f"Checkpoint '{path}' foi gravado com Discriminador "
+                f"'{gravada.get('discriminator')}', mas esta execução usa "
+                f"'{arquitetura.get('discriminator')}'. Os pesos são "
+                f"incompatíveis: retome com --discriminator "
+                f"{gravada.get('discriminator')} ou inicie um treino novo."
+            )
+        if gravada.get("vgg_layer") != arquitetura.get("vgg_layer"):
+            print(f"AVISO: o checkpoint foi treinado com VGG "
+                  f"{gravada.get('vgg_layer')} e esta execução usa "
+                  f"{arquitetura.get('vgg_layer')}. Os pesos carregam, mas o "
+                  f"objetivo muda no meio do treino — as épocas não são "
+                  f"comparáveis entre si.", flush=True)
 
     unwrap(generator).load_state_dict(state["generator"])
     unwrap(discriminator).load_state_dict(state["discriminator"])
