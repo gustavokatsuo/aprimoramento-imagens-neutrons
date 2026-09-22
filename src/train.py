@@ -321,13 +321,21 @@ def train(args):
             with torch.no_grad():
                 epoch_ssim = calculate_ssim(gen_hr, imgs_hr).item()
             n_gan = n_batches if not pretraining else 1  # evita divisão por zero
+            # loss_content vai para colunas SEPARADAS por fase. No pré-treino
+            # ela é MSE pixel-a-pixel; na fase GAN é MSE sobre features da VGG.
+            # São grandezas de escalas diferentes (medidas: ~0.29 e ~9.5 nos
+            # mesmos dados) e, numa coluna única, a troca de definição aparece
+            # como um salto de 30x que parece piora do modelo sem ser.
+            # PSNR e SSIM continuam comparáveis entre as duas fases.
+            media = lambda k: f"{sums[k] / n_batches:.6f}"
             log_epoch_csv(args.log_file, {
                 "epoch": epoch,
                 "phase": "pretrain" if pretraining else "gan",
-                "loss_D": f"{sums['loss_D'] / n_batches:.6f}",
-                "loss_G": f"{sums['loss_G'] / n_batches:.6f}",
-                "loss_content": f"{sums['loss_content'] / n_batches:.6f}",
-                "loss_GAN": f"{sums['loss_GAN'] / n_batches:.6f}",
+                "loss_D": media("loss_D"),
+                "loss_G": media("loss_G"),
+                "loss_content_mse": media("loss_content") if pretraining else "",
+                "loss_content_vgg": "" if pretraining else media("loss_content"),
+                "loss_GAN": media("loss_GAN"),
                 "D_real_prob": f"{sums['d_real'] / n_gan:.4f}" if not pretraining else "",
                 "D_fake_prob": f"{sums['d_fake'] / n_gan:.4f}" if not pretraining else "",
                 "psnr": f"{sums['psnr'] / n_batches:.3f}",
