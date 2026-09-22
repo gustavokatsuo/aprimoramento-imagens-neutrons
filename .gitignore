@@ -10,6 +10,16 @@ data/**
 *.pth
 *.pt
 
+# Saídas geradas a cada execução de treino
+samples/
+results/
+runs/
+
+# Logs: os CSVs de métricas são resultado do experimento e ficam versionados;
+# a saída bruta dos jobs do SLURM, não
+logs/*.out
+logs/*.err
+
 # Ficheiros temporários do Jupyter Notebook / Colab
 .ipynb_checkpoints/
 
