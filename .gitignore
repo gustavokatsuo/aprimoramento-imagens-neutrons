@@ -1,6 +1,10 @@
 # Ficheiros de dados (Imagens, radiografias, etc.)
-data/
-!data/.gitkeep
+# O conteúdo não é versionado, mas a ESTRUTURA de pastas sim, via .gitkeep:
+# 'data/' sozinho excluía o diretório inteiro e o git nem descia nele, então
+# o '!data/.gitkeep' anterior nunca chegava a ser avaliado.
+data/**
+!data/**/
+!data/**/.gitkeep
 
 # Pesos do modelo PyTorch
 *.pth
