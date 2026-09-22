@@ -64,6 +64,9 @@ def parse_args():
                              "Ledig et al. 2017)")
     parser.add_argument("--grad-clip", type=float, default=0.0,
                         help="Norma máxima do gradiente (0 = sem clipping)")
+    parser.add_argument("--amp", action="store_true",
+                        help="Precisão mista (float16) na GPU: reduz a memória de "
+                             "ativação e acelera o treino. Ignorado sem CUDA")
     parser.add_argument("--seed", type=int, default=42,
                         help="Semente para reprodutibilidade")
     parser.add_argument("--num-workers", type=int, default=4)
@@ -226,6 +229,17 @@ def train(args):
     optimizer_G = optim.Adam(generator.parameters(), lr=args.lr, betas=(0.9, 0.999))
     optimizer_D = optim.Adam(discriminator.parameters(), lr=args.lr, betas=(0.9, 0.999))
 
+    # Precisão mista: só faz sentido em CUDA. Os GradScaler são separados
+    # porque G e D têm seus próprios backward e podem divergir de escala.
+    usar_amp = args.amp and device.type == "cuda"
+    if args.amp and not usar_amp:
+        print("AVISO: --amp pedido, mas não há CUDA disponível; "
+              "seguindo em precisão simples.", flush=True)
+    scaler_G = torch.amp.GradScaler(device.type, enabled=usar_amp)
+    scaler_D = torch.amp.GradScaler(device.type, enabled=usar_amp)
+    if usar_amp:
+        print("Precisão mista (AMP) ativa", flush=True)
+
     # --- 4. Carregamento de Dados ---
     if not os.path.exists(args.data_dir):
         print(f"AVISO: A pasta '{args.data_dir}' não existe. Coloque as radiografias lá para rodar.", flush=True)
@@ -286,7 +300,8 @@ def train(args):
     if args.resume:
         start_epoch = load_checkpoint(args.resume, generator, discriminator,
                                       optimizer_G, optimizer_D, device,
-                                      arquitetura=arquitetura)
+                                      arquitetura=arquitetura,
+                                      scalers={"G": scaler_G, "D": scaler_D})
 
     # --- 5. Loop de Treinamento ---
     for epoch in range(start_epoch, args.epochs):
@@ -313,36 +328,41 @@ def train(args):
             # -------------------------
             optimizer_G.zero_grad()
 
-            # Gera uma imagem de alta resolução a partir da baixa
-            gen_hr = generator(imgs_lr)
+            with torch.amp.autocast(device.type, enabled=usar_amp):
+                # Gera uma imagem de alta resolução a partir da baixa
+                gen_hr = generator(imgs_lr)
 
-            if pretraining:
-                # Pré-treino: MSE pixel-a-pixel direto (sem VGG, sem adversarial)
-                loss_content = criterion_content(gen_hr, imgs_hr)
-                loss_GAN = torch.zeros((), device=device)
-                loss_G = loss_content
-            else:
-                # Adversarial Loss: O gerador quer que o discriminador ache que a gen_hr é 'valid' (1)
-                pred_fake = discriminator(gen_hr)
-                loss_GAN = criterion_GAN(pred_fake, valid)
+                if pretraining:
+                    # Pré-treino: MSE pixel-a-pixel direto (sem VGG, sem adversarial)
+                    loss_content = criterion_content(gen_hr, imgs_hr)
+                    loss_GAN = torch.zeros((), device=device)
+                    loss_G = loss_content
+                else:
+                    # Adversarial Loss: O gerador quer que o discriminador ache que a gen_hr é 'valid' (1)
+                    pred_fake = discriminator(gen_hr)
+                    loss_GAN = criterion_GAN(pred_fake, valid)
 
-                # Content Loss: Compara as características da VGG da imagem gerada vs real.
-                # CORREÇÃO: a VGG espera entrada em [0, 1] (estatísticas ImageNet),
-                # mas gen_hr/imgs_hr estão em [-1, 1] — denormalize antes de extrair
-                gen_features = feature_extractor(denormalize(gen_hr))
-                real_features = feature_extractor(denormalize(imgs_hr))
-                loss_content = criterion_content(gen_features, real_features.detach())
+                    # Content Loss: Compara as características da VGG da imagem gerada vs real.
+                    # CORREÇÃO: a VGG espera entrada em [0, 1] (estatísticas ImageNet),
+                    # mas gen_hr/imgs_hr estão em [-1, 1] — denormalize antes de extrair
+                    gen_features = feature_extractor(denormalize(gen_hr))
+                    real_features = feature_extractor(denormalize(imgs_hr))
+                    loss_content = criterion_content(gen_features, real_features.detach())
 
-                # Perda Total do Gerador. O peso EFETIVO do termo adversarial
-                # depende da magnitude da content loss, que por sua vez depende
-                # de --vgg-layer: com relu3_4 e content_weight=1.0 a parcela
-                # adversarial fica na casa de 0,01% da perda total.
-                loss_G = args.content_weight * loss_content + args.adv_weight * loss_GAN
+                    # Perda Total do Gerador. O peso EFETIVO do termo adversarial
+                    # depende da magnitude da content loss, que por sua vez depende
+                    # de --vgg-layer: com relu3_4 e content_weight=1.0 a parcela
+                    # adversarial fica na casa de 0,01% da perda total.
+                    loss_G = args.content_weight * loss_content + args.adv_weight * loss_GAN
 
-            loss_G.backward()
+            scaler_G.scale(loss_G).backward()
             if args.grad_clip > 0:
+                # O clipping precisa ver os gradientes na escala real, não na
+                # escala inflada pelo GradScaler.
+                scaler_G.unscale_(optimizer_G)
                 nn.utils.clip_grad_norm_(generator.parameters(), args.grad_clip)
-            optimizer_G.step()
+            scaler_G.step(optimizer_G)
+            scaler_G.update()
 
             # -----------------------------
             # Treinamento do Discriminador (D)
@@ -355,21 +375,24 @@ def train(args):
             else:
                 optimizer_D.zero_grad()
 
-                # Avalia as imagens reais
-                pred_real = discriminator(imgs_hr)
-                loss_real = criterion_GAN(pred_real, valid)
+                with torch.amp.autocast(device.type, enabled=usar_amp):
+                    # Avalia as imagens reais
+                    pred_real = discriminator(imgs_hr)
+                    loss_real = criterion_GAN(pred_real, valid)
 
-                # Avalia as imagens falsas geradas (usando detach para não atualizar o Gerador aqui)
-                pred_fake = discriminator(gen_hr.detach())
-                loss_fake = criterion_GAN(pred_fake, fake)
+                    # Avalia as imagens falsas geradas (usando detach para não atualizar o Gerador aqui)
+                    pred_fake = discriminator(gen_hr.detach())
+                    loss_fake = criterion_GAN(pred_fake, fake)
 
-                # Perda Média do Discriminador
-                loss_D = (loss_real + loss_fake) / 2
+                    # Perda Média do Discriminador
+                    loss_D = (loss_real + loss_fake) / 2
 
-                loss_D.backward()
+                scaler_D.scale(loss_D).backward()
                 if args.grad_clip > 0:
+                    scaler_D.unscale_(optimizer_D)
                     nn.utils.clip_grad_norm_(discriminator.parameters(), args.grad_clip)
-                optimizer_D.step()
+                scaler_D.step(optimizer_D)
+                scaler_D.update()
 
                 # Probabilidades médias D(real) e D(fake): sinal direto de colapso
                 # (D(real)->1 e D(fake)->0 constantes = D dominando; ambos ~0.5 = equilíbrio)
@@ -379,7 +402,9 @@ def train(args):
 
             # --- 6. Logs e Métricas ---
             with torch.no_grad():
-                current_psnr = calculate_psnr(gen_hr, imgs_hr).item()
+                # .float(): sob AMP gen_hr sai em float16 e as métricas precisam
+                # da precisão simples para não introduzir erro próprio
+                current_psnr = calculate_psnr(gen_hr.float(), imgs_hr).item()
 
             sums["loss_D"] += loss_D.item()
             sums["loss_G"] += loss_G.item()
@@ -400,7 +425,7 @@ def train(args):
         # --- Log estruturado por época (CSV append-only) ---
         if n_batches > 0:
             with torch.no_grad():
-                epoch_ssim = calculate_ssim(gen_hr, imgs_hr).item()
+                epoch_ssim = calculate_ssim(gen_hr.float(), imgs_hr).item()
             n_gan = n_batches if not pretraining else 1  # evita divisão por zero
             # loss_content vai para colunas SEPARADAS por fase. No pré-treino
             # ela é MSE pixel-a-pixel; na fase GAN é MSE sobre features da VGG.
@@ -427,14 +452,15 @@ def train(args):
         # Checkpoint retomável (modelos + otimizadores + época + RNG) toda época
         save_checkpoint(os.path.join(args.weights_dir, "checkpoint_last.pth"),
                         epoch, generator, discriminator, optimizer_G, optimizer_D,
-                        arquitetura=arquitetura)
+                        arquitetura=arquitetura,
+                        scalers={"G": scaler_G, "D": scaler_D})
 
         # Salva amostras visuais e os pesos do modelo
         if (epoch + 1) % args.sample_interval == 0 or epoch == 0:
             # imgs_lr/imgs_hr/gen_hr vêm do loop de batches: só existem se a
             # época processou ao menos um
             if n_batches > 0:
-                save_samples(epoch, imgs_lr, imgs_hr, gen_hr,
+                save_samples(epoch, imgs_lr, imgs_hr, gen_hr.float(),
                              save_dir=args.samples_dir)
             save_model_weights(generator, discriminator, epoch, save_dir=args.weights_dir)
             if step_edge_loader is not None:
