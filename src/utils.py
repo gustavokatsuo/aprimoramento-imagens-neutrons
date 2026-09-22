@@ -293,6 +293,33 @@ def mtf_from_edge(edge_image, oversample=4, window_halfwidth=16):
 
     return freq, mtf
 
+def mtf10_from_edge(edge_image, threshold=0.1):
+    """
+    Mede a frequência de corte (MTF10 por padrão) de uma imagem de borda,
+    devolvendo (valor, estado).
+
+    O estado separa três desfechos que antes se confundiam num único 'nan'
+    gravado no CSV:
+
+      'ok'               -> a MTF cruzou o limiar; o valor é utilizável.
+      'sem_cruzamento'   -> a MTF nunca caiu abaixo do limiar no intervalo
+                            medido. Acontece tipicamente quando ruído de alta
+                            frequência sustenta a curva, e NÃO deve ser lido
+                            como resolução alta: é ausência de medida.
+      'falha: <motivo>'  -> não foi possível medir (borda não detectável,
+                            LSF degenerada, imagem não-2D).
+
+    Sem essa distinção, uma época em que a medição falhou e outra em que a
+    curva não cruzou o limiar aparecem idênticas na planilha do relatório.
+    """
+    try:
+        freq, mtf = mtf_from_edge(edge_image)
+    except ValueError as e:
+        return float("nan"), f"falha: {e}"
+
+    fc = cutoff_frequency(freq, mtf, threshold=threshold)
+    return fc, ("sem_cruzamento" if np.isnan(fc) else "ok")
+
 def cutoff_frequency(freq, mtf, threshold=0.1):
     """
     Frequência espacial de corte: primeira frequência em que a MTF cai abaixo

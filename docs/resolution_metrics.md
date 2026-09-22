@@ -68,6 +68,13 @@ entrada LR interpolada mostra exatamente **em quais frequências** houve
 recuperação de informação — e distingue recuperação real de mero realce de
 contraste (que não desloca a curva para frequências mais altas).
 
+**No código:** `validate_step_edges` (`src/train.py`) mede as **três** a cada
+validação — `mtf10_lr_bicubic`, `mtf10_sr` e `mtf10_hr` — sobre o mesmo
+phantom. A bicúbica é a linha de base que torna o número interpretável: é o
+que se obtém sem nenhum aprendizado. MTF10 da SR **acima** da bicúbica é
+evidência de recuperação; igual ou abaixo significa que a rede não entregou
+resolução além da interpolação, por melhores que estejam PSNR e SSIM.
+
 ## 5. Frequência espacial de corte
 
 Frequência em que a MTF cai abaixo de um limiar convencionado — usamos
@@ -79,7 +86,23 @@ com contraste utilizável.
 um único número físico e auditável por época de treino (registrado em
 `logs/step_edge_mtf.csv` pela validação de bordas em `src/train.py`). Um
 aumento da frequência de corte da imagem super-resolvida em relação à
-degradada é a evidência mais forte de ganho real de resolução.
+**bicúbica** é a evidência mais forte de ganho real de resolução.
+
+**Quando o número não existe.** A coluna `status` distingue três desfechos
+que de outro modo se confundiriam numa célula vazia:
+
+| status | significado |
+|---|---|
+| `ok` | a MTF cruzou o limiar; o valor é utilizável |
+| `sem_cruzamento` | a MTF nunca caiu abaixo de 0.1 no intervalo medido |
+| `falha: <motivo>` | não foi possível medir (borda não detectável, LSF degenerada) |
+
+`sem_cruzamento` **não** é resolução alta: é ausência de medida. Ocorre
+tipicamente quando ruído de alta frequência sustenta a curva — o mesmo
+mecanismo que pode fazer o MTF10 da saída da rede superar o da própria
+referência HR. Por isso o CSV registra `psnr_lr_bicubic` e `psnr_sr` ao lado
+das MTF: uma MTF10 alta acompanhada de PSNR baixo indica ruído ou alucinação,
+não resolução.
 
 ## Protocolo de comparação
 

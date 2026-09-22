@@ -15,7 +15,7 @@ from src.data_loader import (get_dataloader, get_step_edge_loader,
 from src.utils import (calculate_psnr, calculate_ssim, save_samples,
                        save_model_weights, save_checkpoint, load_checkpoint,
                        log_epoch_csv, save_run_config, denormalize,
-                       mtf_from_edge, cutoff_frequency)
+                       mtf10_from_edge)
 
 def parse_args():
     """
@@ -106,10 +106,18 @@ def set_seed(seed):
 def validate_step_edges(generator, loader, device, epoch, log_path="logs/step_edge_mtf.csv"):
     """
     Validação com os phantoms de borda: mede a frequência de corte (MTF10) da
-    imagem super-resolvida vs. da imagem HR de referência. Esses valores,
-    registrados por época, mostram se o ganho de resolução é REAL (ver
-    docs/resolution_metrics.md). Erros em um phantom individual não
-    interrompem o treino.
+    imagem super-resolvida, da referência HR e da MESMA entrada LR levada ao
+    tamanho HR por interpolação bicúbica.
+
+    A curva bicúbica é a linha de base que torna o número interpretável: ela é
+    o que se obtém sem nenhum aprendizado. MTF10 da SR acima da bicúbica é
+    evidência de recuperação de frequência; igual ou abaixo significa que a
+    rede não entregou resolução além da interpolação, por melhor que estejam
+    PSNR e SSIM (ver docs/resolution_metrics.md).
+
+    Cada uma das três medidas é feita de forma independente, com seu próprio
+    estado registrado: a falha de uma não descarta as outras, e a linha vai
+    para o CSV de qualquer maneira, para que a lacuna fique visível.
     """
     generator.eval()
     with torch.no_grad():
@@ -120,27 +128,40 @@ def validate_step_edges(generator, loader, device, epoch, log_path="logs/step_ed
 
             gen_hr = generator(imgs_lr)
 
-            sr_img = denormalize(gen_hr).clamp(0, 1).squeeze().cpu().numpy()
-            hr_img = denormalize(imgs_hr).clamp(0, 1).squeeze().cpu().numpy()
+            # Interpolação bicúbica da LR no domínio do modelo, [-1, 1];
+            # o clamp contém o overshoot característico do bicúbico.
+            bic_hr = torch.nn.functional.interpolate(
+                imgs_lr, size=imgs_hr.shape[2:], mode="bicubic",
+                align_corners=False).clamp(-1.0, 1.0)
 
-            try:
-                freq_sr, mtf_sr = mtf_from_edge(sr_img)
-                freq_hr, mtf_hr = mtf_from_edge(hr_img)
-                fc_sr = cutoff_frequency(freq_sr, mtf_sr)
-                fc_hr = cutoff_frequency(freq_hr, mtf_hr)
-            except ValueError as e:
-                print(f"[Bordas] Falha ao medir MTF de '{name}': {e}", flush=True)
-                continue
+            def em_2d(tensor):
+                return denormalize(tensor).clamp(0, 1).squeeze().cpu().numpy()
 
-            psnr_sr = calculate_psnr(gen_hr, imgs_hr).item()
+            medidas, pendencias = {}, []
+            for rotulo, tensor in (("lr_bicubic", bic_hr),
+                                   ("sr", gen_hr),
+                                   ("hr", imgs_hr)):
+                valor, estado = mtf10_from_edge(em_2d(tensor))
+                medidas[rotulo] = valor
+                if estado != "ok":
+                    pendencias.append(f"{rotulo}={estado}")
+
+            num = lambda v: "" if math.isnan(v) else f"{v:.4f}"
             log_epoch_csv(log_path, {
                 "epoch": epoch,
                 "sample": name,
-                "mtf10_sr": f"{fc_sr:.4f}",
-                "mtf10_hr": f"{fc_hr:.4f}",
-                "psnr_sr": f"{psnr_sr:.3f}",
+                "mtf10_lr_bicubic": num(medidas["lr_bicubic"]),
+                "mtf10_sr": num(medidas["sr"]),
+                "mtf10_hr": num(medidas["hr"]),
+                "psnr_lr_bicubic": f"{calculate_psnr(bic_hr, imgs_hr).item():.3f}",
+                "psnr_sr": f"{calculate_psnr(gen_hr, imgs_hr).item():.3f}",
+                "status": ";".join(pendencias) if pendencias else "ok",
             })
-            print(f"[Bordas] {name}: MTF10 SR={fc_sr:.3f} ciclos/px | HR={fc_hr:.3f} ciclos/px", flush=True)
+
+            txt = lambda v: "n/d" if math.isnan(v) else f"{v:.3f}"
+            print(f"[Bordas] {name}: MTF10 bicúbica={txt(medidas['lr_bicubic'])} | "
+                  f"SR={txt(medidas['sr'])} | HR={txt(medidas['hr'])} ciclos/px"
+                  + (f"  [{';'.join(pendencias)}]" if pendencias else ""), flush=True)
     generator.train()
 
 def train(args):
