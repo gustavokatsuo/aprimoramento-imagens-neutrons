@@ -1,24 +1,21 @@
 #!/bin/bash
 #===============================================================================
-# Script de treinamento SRGAN no cluster Coaraci (SLURM)
+# Treinamento SRGAN no cluster Coaraci (SLURM)
 #
-# ANTES DE SUBMETER, preencha os campos <ENTRE_COLCHETES> abaixo com as
-# informações do cluster (obtenha com a equipe de suporte do Coaraci ou via
-# `sinfo`, `sacctmgr show assoc user=$USER` e a documentação do cluster):
+# Ainda falta preencher (peça ao suporte do Coaraci, ou copie do script SLURM
+# do orientador, que já roda no cluster):
 #
-#   <PARTICAO>        -> nome da partição/fila com GPU (ex.: gpu, paralela)
-#                        Descubra com: sinfo -o "%P %G %l"
-#   <CONTA>           -> conta/projeto de alocação (se o cluster exigir)
-#                        Descubra com: sacctmgr show assoc user=$USER format=account
-#   <N_GPUS>          -> número de GPUs por job (1 é suficiente para este treino)
-#   <TEMPO_MAXIMO>    -> walltime no formato HH:MM:SS (ex.: 24:00:00)
-#   <MODULO_PYTHON>   -> módulo de Python/CUDA a carregar (veja: module avail)
-#                        ex.: python/3.11, cuda/12.4 — depende do que o Coaraci oferece
-#   <CAMINHO_PROJETO> -> caminho absoluto do repositório no filesystem do cluster
+#   <PARTICAO>       fila com GPU           -> sinfo -o "%P %G %l"
+#   <CONTA>          conta de alocação      -> sacctmgr show assoc user=$USER format=account
+#   <N_GPUS>         GPUs por job
+#   <TEMPO_MAXIMO>   walltime HH:MM:SS      (ex.: 24:00:00)
+#   <MODULOS>        módulos a carregar     -> module avail
+#   <RAIZ_SCRATCH>   raiz do scratch do nó  (ex.: /scratch/$USER)
 #
-# Submissão:   sbatch scripts/train_coaraci.slurm
-# Fila:        squeue -u $USER
-# Retomada:    adicione --resume weights/checkpoint_last.pth aos argumentos
+# Submissão:  sbatch scripts/train_coaraci.slurm
+# Fila:       squeue -u $USER
+# Retomada:   sbatch --export=ALL,RESUME=runs/<job>/weights/checkpoint_last.pth \
+#                    scripts/train_coaraci.slurm
 #===============================================================================
 
 #SBATCH --job-name=srgan-neutrons
@@ -29,39 +26,78 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:<N_GPUS>
 #SBATCH --time=<TEMPO_MAXIMO>
-#SBATCH --output=logs/slurm_%j.out
-#SBATCH --error=logs/slurm_%j.err
+#SBATCH --output=out_%j.txt
+#SBATCH --error=err_%j.txt
 
-# --- Ambiente ---
+set -euo pipefail
+
+MODULOS="<MODULOS>"
+SCRATCH_RAIZ="<RAIZ_SCRATCH>"
+
+PROJETO="${SLURM_SUBMIT_DIR}"
+TRABALHO="${SCRATCH_RAIZ}/srgan-${SLURM_JOB_ID}"
+
+echo "[$(hostname)] job ${SLURM_JOB_ID} | projeto ${PROJETO} | scratch ${TRABALHO}"
+
+# --- Ambiente ---------------------------------------------------------------
 module purge
-module load <MODULO_PYTHON>
-# module load <MODULO_CUDA>   # descomente se CUDA for um módulo separado no Coaraci
+module load ${MODULOS}
+source "${PROJETO}/venv/bin/activate"
 
-cd <CAMINHO_PROJETO>
+# Explícito, em vez de contar com o SLURM iniciar no diretório de submissão:
+# 'python -m src.train' precisa da raiz do projeto no caminho de import.
+cd "${PROJETO}"
 
-# Ambiente virtual do projeto (crie uma vez no cluster com:
-#   python -m venv venv && venv/bin/pip install -r requirements.txt)
-source venv/bin/activate
+# --- Dados no scratch -------------------------------------------------------
+# Ler as radiografias direto do home castiga o filesystem compartilhado durante
+# todo o treino. Copia-se uma vez para o scratch e lê-se de lá.
+mkdir -p "${TRABALHO}/data"
+cp -r "${PROJETO}/data/raw" "${TRABALHO}/data/"
+cp -r "${PROJETO}/data/step_edges" "${TRABALHO}/data/" 2>/dev/null || \
+    echo "AVISO: sem data/step_edges — o treino roda, mas sem a validação de MTF"
 
-mkdir -p logs
+# O checkpoint de retomada também precisa estar no scratch
+ARG_RESUME=""
+if [[ -n "${RESUME:-}" ]]; then
+    cp "${PROJETO}/${RESUME}" "${TRABALHO}/retomar.pth"
+    ARG_RESUME="--resume ${TRABALHO}/retomar.pth"
+    echo "Retomando de ${RESUME}"
+fi
 
-# --- Treinamento (single-GPU; ver nota sobre DDP abaixo) ---
-python -m src.train \
-    --data-dir data/raw \
+# Traz os resultados de volta mesmo se o job for interrompido por walltime ou
+# erro: sem isto, um treino de horas some junto com o scratch do nó.
+recuperar_resultados() {
+    if [[ ! -d "${TRABALHO}/run" ]]; then
+        echo "AVISO: nada a recuperar — o treino não chegou a gravar ${TRABALHO}/run"
+        return
+    fi
+    mkdir -p "${PROJETO}/runs"
+    if cp -r "${TRABALHO}/run" "${PROJETO}/runs/${SLURM_JOB_ID}"; then
+        echo "Resultados em ${PROJETO}/runs/${SLURM_JOB_ID}"
+    else
+        echo "ERRO: falha ao copiar os resultados; eles seguem em ${TRABALHO}/run"
+    fi
+}
+trap recuperar_resultados EXIT
+
+# --- Treinamento ------------------------------------------------------------
+# --run-dir agrupa config.json, logs, pesos e amostras desta execução num lugar
+# só, de modo que jobs simultâneos não escrevam uns por cima dos outros.
+# As GPUs do nó são usadas automaticamente (DataParallel) e --batch-size é o
+# batch TOTAL, dividido entre elas.
+# python -u complementa o flush=True dos prints: nada fica preso no buffer e o
+# out_%j.txt acompanha o treino em tempo real.
+python -u -m src.train \
+    --data-dir      "${TRABALHO}/data/raw" \
+    --step-edge-dir "${TRABALHO}/data/step_edges" \
+    --run-dir       "${TRABALHO}/run" \
     --epochs 100 \
     --pretrain-epochs 5 \
-    --batch-size 8 \
+    --batch-size 16 \
     --lr 1e-4 \
     --patch-size 256 \
     --num-workers "${SLURM_CPUS_PER_TASK}" \
     --seed 42 \
-    --log-file logs/training_log.csv
-    # --resume weights/checkpoint_last.pth   # descomente para retomar um treino
+    ${ARG_RESUME}
 
-#===============================================================================
-# NOTA SOBRE MULTI-GPU (DDP): o treino atual é single-GPU, o que é adequado
-# para o tamanho do dataset e do modelo. Se os experimentos exigirem múltiplas
-# GPUs no futuro, o caminho é torchrun + DistributedDataParallel, o que requer
-# mudanças em src/train.py (DistributedSampler, inicialização do process group).
-# Decisão em aberto — confirmar com o orientador se vale a complexidade.
-#===============================================================================
+echo "Treinamento concluído."
