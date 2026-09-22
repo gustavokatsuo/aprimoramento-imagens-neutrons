@@ -4,7 +4,11 @@ from torchvision.utils import save_image
 from torchmetrics.functional.image import structural_similarity_index_measure
 import os
 import csv
+import json
+import platform
 import random
+import subprocess
+from datetime import datetime
 
 def denormalize(tensors):
     """
@@ -129,6 +133,57 @@ def load_checkpoint(path, generator, discriminator, optimizer_G, optimizer_D, de
 
     print(f"Checkpoint '{path}' carregado. Retomando da época {state['epoch'] + 1}.")
     return state["epoch"] + 1
+
+def _git_revision():
+    """
+    Commit do código no momento da execução, com marca de árvore suja. Retorna
+    None fora de um repositório git (ex.: cópia enviada solta para o cluster).
+    """
+    # Ancorado na pasta DESTE arquivo, não no diretório de trabalho: um job que
+    # roda a partir de outro lugar (scratch do nó, por exemplo) ainda registra
+    # o commit correto em vez de perder a procedência silenciosamente.
+    raiz = os.path.dirname(os.path.abspath(__file__))
+    try:
+        rev = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=raiz,
+                                      stderr=subprocess.DEVNULL, text=True).strip()
+        sujo = subprocess.check_output(["git", "status", "--porcelain"], cwd=raiz,
+                                       stderr=subprocess.DEVNULL, text=True).strip()
+        return rev + ("-sujo" if sujo else "")
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return None
+
+def save_run_config(path, args):
+    """
+    Grava a procedência da execução: todos os argumentos, o commit do código,
+    as versões e o ambiente (incluindo o job do SLURM, quando houver).
+
+    Um CSV de métricas sozinho não diz qual código nem quais hiperparâmetros o
+    produziram. Numa campanha de experimentos no cluster, sem este arquivo não
+    há como afirmar, meses depois, de onde veio um número do relatório.
+    """
+    save_dir = os.path.dirname(path)
+    if save_dir and not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+
+    info = {
+        "datahora": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "git_commit": _git_revision(),
+        "argumentos": vars(args),
+        "ambiente": {
+            "host": platform.node(),
+            "python": platform.python_version(),
+            "torch": torch.__version__,
+            "cuda_disponivel": torch.cuda.is_available(),
+            "cuda": torch.version.cuda,
+            "gpu": (torch.cuda.get_device_name(0)
+                    if torch.cuda.is_available() else None),
+            "n_gpus": torch.cuda.device_count(),
+        },
+        "slurm": {k: v for k, v in os.environ.items() if k.startswith("SLURM_")} or None,
+    }
+    with open(path, "w") as f:
+        json.dump(info, f, indent=2, ensure_ascii=False, default=str)
+    print(f"Configuração da execução registrada em {path}")
 
 def log_epoch_csv(log_path, row):
     """

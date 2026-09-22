@@ -14,8 +14,8 @@ from src.data_loader import (get_dataloader, get_step_edge_loader,
                              list_supported_images, SUPPORTED_EXTENSIONS)
 from src.utils import (calculate_psnr, calculate_ssim, save_samples,
                        save_model_weights, save_checkpoint, load_checkpoint,
-                       log_epoch_csv, denormalize, mtf_from_edge,
-                       cutoff_frequency)
+                       log_epoch_csv, save_run_config, denormalize,
+                       mtf_from_edge, cutoff_frequency)
 
 def parse_args():
     """
@@ -50,6 +50,10 @@ def parse_args():
                         help="Intervalo (épocas) para salvar amostras, pesos e validação de bordas")
     parser.add_argument("--log-file", type=str, default="logs/training_log.csv",
                         help="CSV append-only com as métricas por época")
+    parser.add_argument("--run-dir", type=str, default=None,
+                        help="Pasta desta execução: config, logs, pesos e amostras "
+                             "vão todos para dentro dela (ex.: runs/$SLURM_JOB_ID). "
+                             "Omitida, cada saída usa seu próprio argumento")
     parser.add_argument("--weights-dir", type=str, default="weights")
     parser.add_argument("--samples-dir", type=str, default="samples",
                         help="Pasta das grades de comparação LR|SR|HR salvas por época")
@@ -76,6 +80,13 @@ def parse_args():
     # .fits, possivelmente minutos depois de o job começar.
     if args.fits_normalization == "range" and args.fits_range is None:
         parser.error("--fits-normalization=range exige --fits-range LO HI.")
+
+    # --run-dir agrupa tudo de uma execução num lugar só. É o modo pensado para
+    # o cluster: cada job escreve em runs/<id> e nenhum pisa no outro.
+    if args.run_dir:
+        args.weights_dir = os.path.join(args.run_dir, "weights")
+        args.log_file = os.path.join(args.run_dir, "logs", "training_log.csv")
+        args.samples_dir = os.path.join(args.run_dir, "samples")
 
     return args
 
@@ -133,6 +144,11 @@ def train(args):
     print(f"Iniciando treinamento usando: {device}")
 
     set_seed(args.seed)
+
+    # Procedência ANTES de qualquer treino: se o job morrer no meio, o registro
+    # do que foi pedido já está gravado.
+    save_run_config(os.path.join(os.path.dirname(args.log_file) or ".",
+                                 "config.json"), args)
 
     # --- 2. Inicialização dos Modelos ---
     generator = Generator().to(device)
