@@ -124,7 +124,7 @@ def validate_step_edges(generator, loader, device, epoch, log_path="logs/step_ed
                 fc_sr = cutoff_frequency(freq_sr, mtf_sr)
                 fc_hr = cutoff_frequency(freq_hr, mtf_hr)
             except ValueError as e:
-                print(f"[Bordas] Falha ao medir MTF de '{name}': {e}")
+                print(f"[Bordas] Falha ao medir MTF de '{name}': {e}", flush=True)
                 continue
 
             psnr_sr = calculate_psnr(gen_hr, imgs_hr).item()
@@ -135,13 +135,13 @@ def validate_step_edges(generator, loader, device, epoch, log_path="logs/step_ed
                 "mtf10_hr": f"{fc_hr:.4f}",
                 "psnr_sr": f"{psnr_sr:.3f}",
             })
-            print(f"[Bordas] {name}: MTF10 SR={fc_sr:.3f} ciclos/px | HR={fc_hr:.3f} ciclos/px")
+            print(f"[Bordas] {name}: MTF10 SR={fc_sr:.3f} ciclos/px | HR={fc_hr:.3f} ciclos/px", flush=True)
     generator.train()
 
 def train(args):
     # --- 1. Configurações e Hiperparâmetros ---
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Iniciando treinamento usando: {device}")
+    print(f"Iniciando treinamento usando: {device}", flush=True)
 
     set_seed(args.seed)
 
@@ -166,7 +166,7 @@ def train(args):
 
     # --- 4. Carregamento de Dados ---
     if not os.path.exists(args.data_dir):
-        print(f"AVISO: A pasta '{args.data_dir}' não existe. Coloque as radiografias lá para rodar.")
+        print(f"AVISO: A pasta '{args.data_dir}' não existe. Coloque as radiografias lá para rodar.", flush=True)
         return
 
     # Valida o dataset ANTES de construir o loader: com dataset vazio o próprio
@@ -177,12 +177,12 @@ def train(args):
     n_imgs = len(list_supported_images(args.data_dir))
     if n_imgs == 0:
         print(f"AVISO: Nenhuma imagem suportada em '{args.data_dir}' "
-              f"(extensões aceitas: {', '.join(SUPPORTED_EXTENSIONS)}).")
+              f"(extensões aceitas: {', '.join(SUPPORTED_EXTENSIONS)}).", flush=True)
         return
     if n_imgs < args.batch_size:
         print(f"AVISO: {n_imgs} imagem(ns) em '{args.data_dir}' para --batch-size "
               f"{args.batch_size}. Como o loader usa drop_last=True, nenhum batch "
-              f"se forma. Use --batch-size {n_imgs} ou menos.")
+              f"se forma. Use --batch-size {n_imgs} ou menos.", flush=True)
         return
 
     dataloader = get_dataloader(args.data_dir, batch_size=args.batch_size,
@@ -197,7 +197,7 @@ def train(args):
                                             fits_normalization=args.fits_normalization,
                                             fits_range=args.fits_range)
     if step_edge_loader is not None:
-        print(f"Validação de bordas ativa: {len(step_edge_loader.dataset)} phantom(s) em '{args.step_edge_dir}'")
+        print(f"Validação de bordas ativa: {len(step_edge_loader.dataset)} phantom(s) em '{args.step_edge_dir}'", flush=True)
 
     # O CSV da MTF acompanha --log-file: duas execuções simultâneas no cluster
     # apontando para pastas de log diferentes não podem sobrescrever uma à outra.
@@ -314,7 +314,7 @@ def train(args):
                 phase = "PRÉ" if pretraining else "GAN"
                 print(f"[{phase}][Época {epoch}/{args.epochs}] [Batch {i}/{len(dataloader)}] "
                       f"[D loss: {loss_D.item():.4f}] [G loss: {loss_G.item():.4f}] "
-                      f"[PSNR: {current_psnr:.2f} dB]")
+                      f"[PSNR: {current_psnr:.2f} dB]", flush=True)
 
         # --- Log estruturado por época (CSV append-only) ---
         if n_batches > 0:

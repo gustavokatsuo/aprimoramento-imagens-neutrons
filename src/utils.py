@@ -70,7 +70,7 @@ def save_samples(epoch, lr_imgs, hr_imgs, fake_imgs, save_dir="samples"):
     
     save_path = os.path.join(save_dir, f"epoch_{epoch}.png")
     save_image(comparison, save_path, normalize=True, scale_each=True)
-    print(f"Amostras da época {epoch} salvas em {save_path}")
+    print(f"Amostras da época {epoch} salvas em {save_path}", flush=True)
 
 def save_model_weights(generator, discriminator, epoch, save_dir="weights"):
     """
@@ -131,7 +131,7 @@ def load_checkpoint(path, generator, discriminator, optimizer_G, optimizer_D, de
         np.random.set_state(rng["numpy"])
         random.setstate(rng["python"])
 
-    print(f"Checkpoint '{path}' carregado. Retomando da época {state['epoch'] + 1}.")
+    print(f"Checkpoint '{path}' carregado. Retomando da época {state['epoch'] + 1}.", flush=True)
     return state["epoch"] + 1
 
 def _git_revision():
@@ -183,7 +183,7 @@ def save_run_config(path, args):
     }
     with open(path, "w") as f:
         json.dump(info, f, indent=2, ensure_ascii=False, default=str)
-    print(f"Configuração da execução registrada em {path}")
+    print(f"Configuração da execução registrada em {path}", flush=True)
 
 def log_epoch_csv(log_path, row):
     """

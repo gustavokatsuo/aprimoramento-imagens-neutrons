@@ -92,7 +92,7 @@ def evaluate(args):
         for f in glob.glob(os.path.join(args.data_dir, ext))
     )
     if not files:
-        print(f"AVISO: Nenhuma imagem encontrada em '{args.data_dir}'.")
+        print(f"AVISO: Nenhuma imagem encontrada em '{args.data_dir}'.", flush=True)
         return
 
     # Carrega o Gerador da SRGAN, se solicitado
@@ -143,13 +143,13 @@ def evaluate(args):
                          "psnr": psnr, "ssim": ssim})
 
     # --- Tabela-resumo (média por método) ---
-    print(f"\n{'Método':<20} {'PSNR médio (dB)':>16} {'SSIM médio':>12}   (n={len(files)} imagens)")
-    print("-" * 55)
+    print(f"\n{'Método':<20} {'PSNR médio (dB)':>16} {'SSIM médio':>12}   (n={len(files)} imagens)", flush=True)
+    print("-" * 55, flush=True)
     for method in methods:
         m_rows = [r for r in rows if r["method"] == method]
         mean_psnr = sum(r["psnr"] for r in m_rows) / len(m_rows)
         mean_ssim = sum(r["ssim"] for r in m_rows) / len(m_rows)
-        print(f"{method:<20} {mean_psnr:>16.3f} {mean_ssim:>12.4f}")
+        print(f"{method:<20} {mean_psnr:>16.3f} {mean_ssim:>12.4f}", flush=True)
 
     # --- CSV com os resultados por imagem ---
     out_dir = os.path.dirname(args.output)
@@ -160,7 +160,7 @@ def evaluate(args):
         writer.writeheader()
         for r in rows:
             writer.writerow({**r, "psnr": f"{r['psnr']:.4f}", "ssim": f"{r['ssim']:.5f}"})
-    print(f"\nResultados por imagem salvos em {args.output}")
+    print(f"\nResultados por imagem salvos em {args.output}", flush=True)
 
 if __name__ == "__main__":
     evaluate(parse_args())
