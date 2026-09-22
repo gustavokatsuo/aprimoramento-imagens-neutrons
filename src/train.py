@@ -51,6 +51,8 @@ def parse_args():
     parser.add_argument("--log-file", type=str, default="logs/training_log.csv",
                         help="CSV append-only com as métricas por época")
     parser.add_argument("--weights-dir", type=str, default="weights")
+    parser.add_argument("--samples-dir", type=str, default="samples",
+                        help="Pasta das grades de comparação LR|SR|HR salvas por época")
     parser.add_argument("--step-edge-dir", type=str, default="data/step_edges",
                         help="Pasta com phantoms de borda para validação MTF (opcional)")
     parser.add_argument("--fits-normalization", type=str, default="minmax",
@@ -180,6 +182,11 @@ def train(args):
                                             fits_range=args.fits_range)
     if step_edge_loader is not None:
         print(f"Validação de bordas ativa: {len(step_edge_loader.dataset)} phantom(s) em '{args.step_edge_dir}'")
+
+    # O CSV da MTF acompanha --log-file: duas execuções simultâneas no cluster
+    # apontando para pastas de log diferentes não podem sobrescrever uma à outra.
+    mtf_log_path = os.path.join(os.path.dirname(args.log_file) or ".",
+                                "step_edge_mtf.csv")
 
     # --- Retomada de checkpoint (opcional) ---
     start_epoch = 0
@@ -321,10 +328,12 @@ def train(args):
             # imgs_lr/imgs_hr/gen_hr vêm do loop de batches: só existem se a
             # época processou ao menos um
             if n_batches > 0:
-                save_samples(epoch, imgs_lr, imgs_hr, gen_hr)
+                save_samples(epoch, imgs_lr, imgs_hr, gen_hr,
+                             save_dir=args.samples_dir)
             save_model_weights(generator, discriminator, epoch, save_dir=args.weights_dir)
             if step_edge_loader is not None:
-                validate_step_edges(generator, step_edge_loader, device, epoch)
+                validate_step_edges(generator, step_edge_loader, device, epoch,
+                                    log_path=mtf_log_path)
 
 if __name__ == "__main__":
     train(parse_args())
