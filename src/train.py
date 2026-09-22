@@ -30,7 +30,9 @@ def parse_args():
     parser.add_argument("--pretrain-epochs", type=int, default=5,
                         help="Épocas iniciais só com loss de conteúdo MSE pixel-a-pixel "
                              "(protocolo SRGAN, Ledig et al. 2017); 0 desativa")
-    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--batch-size", type=int, default=8,
+                        help="Batch TOTAL; com múltiplas GPUs o DataParallel "
+                             "divide este valor entre elas")
     parser.add_argument("--lr", type=float, default=1e-4,
                         help="Taxa de aprendizado padrão para SRGAN")
     parser.add_argument("--patch-size", type=int, default=256,
@@ -44,6 +46,9 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42,
                         help="Semente para reprodutibilidade")
     parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--no-data-parallel", action="store_true",
+                        help="Não usa múltiplas GPUs mesmo quando há mais de uma "
+                             "no nó (útil para isolar um experimento por GPU)")
     parser.add_argument("--resume", type=str, default=None,
                         help="Caminho de um checkpoint salvo (weights/checkpoint_last.pth) para retomar")
     parser.add_argument("--sample-interval", type=int, default=5,
@@ -154,6 +159,19 @@ def train(args):
     generator = Generator().to(device)
     discriminator = Discriminator().to(device)
     feature_extractor = FeatureExtractorVGG().to(device)
+
+    # Múltiplas GPUs no mesmo nó: DataParallel replica os modelos e divide o
+    # batch entre elas. É a abordagem usada nos scripts do grupo no Coaraci e
+    # não exige torchrun, DistributedSampler nem process group — ao custo de
+    # concentrar a agregação na GPU 0. Os checkpoints seguem gravados sem o
+    # prefixo 'module.' (ver utils.unwrap), portáveis para 1 GPU ou CPU.
+    n_gpus = torch.cuda.device_count()
+    if n_gpus > 1 and not args.no_data_parallel:
+        print(f"Usando {n_gpus} GPUs via DataParallel "
+              f"(batch total {args.batch_size} dividido entre elas)", flush=True)
+        generator = nn.DataParallel(generator)
+        discriminator = nn.DataParallel(discriminator)
+        feature_extractor = nn.DataParallel(feature_extractor)
 
     # --- 3. Funções de Custo (Loss) e Otimizadores ---
     # Usamos BCEWithLogitsLoss porque removemos a Sigmoid do Discriminador (Modo Pro)

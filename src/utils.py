@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 import numpy as np
 from torchvision.utils import save_image
 from torchmetrics.functional.image import structural_similarity_index_measure
@@ -50,6 +51,16 @@ def calculate_ssim(img1, img2):
     img2_norm = denormalize(img2).clamp(0.0, 1.0)
     return structural_similarity_index_measure(img1_norm, img2_norm, data_range=1.0)
 
+def unwrap(model):
+    """
+    Devolve o módulo interno quando o modelo está embrulhado em DataParallel.
+
+    Todo state_dict gravado passa por aqui: com o wrapper, as chaves ganham o
+    prefixo 'module.' e o arquivo deixa de carregar numa execução de 1 GPU ou
+    em CPU. Os pesos ficam portáveis entre qualquer número de GPUs.
+    """
+    return model.module if isinstance(model, nn.DataParallel) else model
+
 def save_samples(epoch, lr_imgs, hr_imgs, fake_imgs, save_dir="samples"):
     """
     Salva uma grade de comparação: Baixa Resolução | Gerada | Original (Alta Resolução).
@@ -80,8 +91,8 @@ def save_model_weights(generator, discriminator, epoch, save_dir="weights"):
         os.makedirs(save_dir)
 
     # Correção do typo 'state_state_dict' -> 'state_dict'
-    torch.save(generator.state_dict(), os.path.join(save_dir, f"gen_epoch_{epoch}.pth"))
-    torch.save(discriminator.state_dict(), os.path.join(save_dir, f"disc_epoch_{epoch}.pth"))
+    torch.save(unwrap(generator).state_dict(), os.path.join(save_dir, f"gen_epoch_{epoch}.pth"))
+    torch.save(unwrap(discriminator).state_dict(), os.path.join(save_dir, f"disc_epoch_{epoch}.pth"))
 
 def save_checkpoint(path, epoch, generator, discriminator, optimizer_G, optimizer_D):
     """
@@ -96,8 +107,8 @@ def save_checkpoint(path, epoch, generator, discriminator, optimizer_G, optimize
 
     state = {
         "epoch": epoch,
-        "generator": generator.state_dict(),
-        "discriminator": discriminator.state_dict(),
+        "generator": unwrap(generator).state_dict(),
+        "discriminator": unwrap(discriminator).state_dict(),
         "optimizer_G": optimizer_G.state_dict(),
         "optimizer_D": optimizer_D.state_dict(),
         "rng": {
@@ -118,8 +129,8 @@ def load_checkpoint(path, generator, discriminator, optimizer_G, optimizer_D, de
     # weights_only=False é necessário pois o checkpoint contém estados de RNG (numpy/python)
     state = torch.load(path, map_location=device, weights_only=False)
 
-    generator.load_state_dict(state["generator"])
-    discriminator.load_state_dict(state["discriminator"])
+    unwrap(generator).load_state_dict(state["generator"])
+    unwrap(discriminator).load_state_dict(state["discriminator"])
     optimizer_G.load_state_dict(state["optimizer_G"])
     optimizer_D.load_state_dict(state["optimizer_D"])
 
