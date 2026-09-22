@@ -53,12 +53,33 @@ def load_image_as_array(img_path, fits_normalization="minmax", fits_range=None):
         # Leitura científica do TIFF de 16-bits
         img_array = tifffile.imread(img_path)
 
-        # Se a imagem tiver mais de 2 dimensões (ex: RGBA), pega só o canal de cinza
-        if len(img_array.shape) > 2:
-            img_array = img_array[:, :, 0]
+        # Um TIFF com mais de 2 eixos pode ser duas coisas MUITO diferentes:
+        #   (H, W, C) — imagem colorida/RGBA  -> usa-se o primeiro canal
+        #   (N, H, W) — pilha de páginas      -> usa-se a primeira fatia
+        # Projeções de tomografia costumam vir como pilha. O antigo
+        # img_array[:, :, 0] tratava os dois casos como se fossem canais e,
+        # numa pilha (N, H, W), devolvia (N, H): a coluna 0 de cada fatia,
+        # misturando as fatias num array 2D sem significado físico.
+        # A distinção é pelo último eixo: canais são poucos (<= 4), colunas não.
+        if img_array.ndim > 2:
+            if img_array.shape[-1] <= 4:
+                img_array = img_array[..., 0]   # (H, W, C) -> (H, W)
+            else:
+                img_array = img_array[0]        # (N, H, W) -> (H, W)
+            while img_array.ndim > 2:           # ex.: (N, H, W, C)
+                img_array = img_array[0]
 
-        # Converte de 16-bit (0 a 65535) para float32 no intervalo [0, 1]
-        img_array = img_array.astype(np.float32) / 65535.0
+        # A faixa de normalização vem do dtype, não de uma constante: um TIFF
+        # uint8 dividido por 65535 sairia quase preto (~0.004) silenciosamente.
+        if np.issubdtype(img_array.dtype, np.integer):
+            img_array = img_array.astype(np.float32) / np.iinfo(img_array.dtype).max
+        else:
+            raise ValueError(
+                f"TIFF com dtype {img_array.dtype} em '{img_path}': só TIFF de "
+                f"inteiros (uint8/uint16) tem faixa fixa conhecida. Para dados "
+                f"em ponto flutuante use FITS, que tem normalização explícita "
+                f"(ver --fits-normalization)."
+            )
 
     elif ext == ".fits":
         if astropy_fits is None:
