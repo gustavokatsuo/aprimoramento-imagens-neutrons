@@ -38,6 +38,11 @@ def parse_args():
                         help="Taxa de aprendizado padrão para SRGAN")
     parser.add_argument("--patch-size", type=int, default=256,
                         help="Tamanho do recorte HR para treino")
+    parser.add_argument("--patches-per-image", type=int, default=1,
+                        help="Recortes aleatórios que cada radiografia rende por "
+                             "época. Com 1 (padrão histórico), uma época tem "
+                             "tantas amostras quanto imagens — para treinar de "
+                             "verdade use algo na casa das dezenas ou centenas")
     parser.add_argument("--lr-scale", type=int, default=4,
                         help="Fator de super-resolução (deve casar com o Gerador: 4x)")
     parser.add_argument("--adv-weight", type=float, default=1e-3,
@@ -236,15 +241,27 @@ def train(args):
         print(f"AVISO: Nenhuma imagem suportada em '{args.data_dir}' "
               f"(extensões aceitas: {', '.join(SUPPORTED_EXTENSIONS)}).", flush=True)
         return
-    if n_imgs < args.batch_size:
-        print(f"AVISO: {n_imgs} imagem(ns) em '{args.data_dir}' para --batch-size "
-              f"{args.batch_size}. Como o loader usa drop_last=True, nenhum batch "
-              f"se forma. Use --batch-size {n_imgs} ou menos.", flush=True)
+
+    n_amostras = n_imgs * args.patches_per_image
+    if n_amostras < args.batch_size:
+        print(f"AVISO: {n_imgs} imagem(ns) x {args.patches_per_image} patch(es) = "
+              f"{n_amostras} amostra(s) para --batch-size {args.batch_size}. Como o "
+              f"loader usa drop_last=True, nenhum batch se forma. Reduza o batch ou "
+              f"aumente --patches-per-image.", flush=True)
         return
+
+    # Uma época curta demais não é erro, mas quase sempre é engano: com poucas
+    # radiografias e 1 patch por imagem, "100 épocas" somam algumas centenas de
+    # amostras e o treino não sai do lugar.
+    if n_amostras < 100:
+        print(f"AVISO: a época tem só {n_amostras} amostra(s) "
+              f"({n_imgs} imagem(ns) x {args.patches_per_image} patch(es)). "
+              f"Considere --patches-per-image maior.", flush=True)
 
     dataloader = get_dataloader(args.data_dir, batch_size=args.batch_size,
                                 num_workers=args.num_workers,
                                 patch_size=args.patch_size, lr_scale=args.lr_scale,
+                                patches_per_image=args.patches_per_image,
                                 fits_normalization=args.fits_normalization,
                                 fits_range=args.fits_range)
 

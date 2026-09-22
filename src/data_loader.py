@@ -125,17 +125,25 @@ def load_image_as_array(img_path, fits_normalization="minmax", fits_range=None):
 
 class NeutronDataset(Dataset):
     def __init__(self, root_dir, patch_size=256, lr_scale=4,
+                 patches_per_image=1,
                  fits_normalization="minmax", fits_range=None):
         """
         root_dir: Caminho para a pasta com as radiografias.
         patch_size: Tamanho do recorte perfeito (sem distorção) para treino.
         lr_scale: Fator de redução para a imagem de baixa resolução.
+        patches_per_image: Quantos recortes aleatórios cada radiografia rende
+            por época. Com 1, uma época tem tantas amostras quanto imagens —
+            com algumas dezenas de radiografias isso são algumas dezenas de
+            patches, ordens de magnitude abaixo do necessário para treinar uma
+            GAN. O recorte e o espelhamento são sorteados a cada acesso, então
+            índices diferentes da mesma imagem produzem patches diferentes.
         fits_normalization / fits_range: ver load_image_as_array (só afetam .fits).
         """
         self.files = list_supported_images(root_dir)
 
         self.patch_size = patch_size
         self.lr_scale = lr_scale
+        self.patches_per_image = max(1, int(patches_per_image))
         self.fits_normalization = fits_normalization
         self.fits_range = fits_range
 
@@ -143,10 +151,13 @@ class NeutronDataset(Dataset):
         self.normalize = transforms.Normalize(mean=[0.5], std=[0.5])
 
     def __len__(self):
-        return len(self.files)
+        return len(self.files) * self.patches_per_image
 
     def __getitem__(self, idx):
-            img_path = self.files[idx]
+            # Os índices percorrem as imagens de forma intercalada, de modo que
+            # qualquer prefixo da época cubra o conjunto todo em vez de esgotar
+            # uma imagem antes de passar para a seguinte.
+            img_path = self.files[idx % len(self.files)]
 
             img_array = load_image_as_array(
                 img_path, self.fits_normalization, self.fits_range
@@ -254,9 +265,10 @@ class StepEdgeDataset(Dataset):
         }
 
 def get_dataloader(root_dir, batch_size=8, shuffle=True, num_workers=4,
-                   patch_size=256, lr_scale=4,
+                   patch_size=256, lr_scale=4, patches_per_image=1,
                    fits_normalization="minmax", fits_range=None):
     dataset = NeutronDataset(root_dir, patch_size=patch_size, lr_scale=lr_scale,
+                             patches_per_image=patches_per_image,
                              fits_normalization=fits_normalization,
                              fits_range=fits_range)
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,
