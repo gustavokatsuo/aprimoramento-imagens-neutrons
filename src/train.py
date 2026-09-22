@@ -59,7 +59,23 @@ def parse_args():
     parser.add_argument("--fits-range", type=float, nargs=2, default=None,
                         metavar=("LO", "HI"),
                         help="Faixa explícita (lo hi) quando --fits-normalization=range")
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    # Validações que precisam falhar AQUI, e não no meio do treino:
+    # o Gerador reconstrói 4x de forma fixa (dois PixelShuffle de 2x em
+    # model.py); com outro fator o erro só aparece no broadcast da loss, com
+    # uma mensagem de shape que não aponta para a causa.
+    if args.lr_scale != 4:
+        parser.error(f"--lr-scale={args.lr_scale} não é suportado: o Gerador "
+                     f"reconstrói 4x (dois PixelShuffle de 2x em model.py). "
+                     f"Outro fator exige alterar a arquitetura.")
+
+    # Idem para a faixa dos FITS: sem isto o erro só surge ao ler o primeiro
+    # .fits, possivelmente minutos depois de o job começar.
+    if args.fits_normalization == "range" and args.fits_range is None:
+        parser.error("--fits-normalization=range exige --fits-range LO HI.")
+
+    return args
 
 def set_seed(seed):
     """Controle de semente para reprodutibilidade (python, numpy, torch, cuda)."""
