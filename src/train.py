@@ -36,6 +36,14 @@ def parse_args():
                              "divide este valor entre elas")
     parser.add_argument("--lr", type=float, default=1e-4,
                         help="Taxa de aprendizado padrão para SRGAN")
+    parser.add_argument("--lr-decay-epochs", type=int, nargs="+", default=None,
+                        metavar="EPOCA",
+                        help="Épocas em que a taxa de aprendizado é multiplicada "
+                             "por --lr-decay-gamma (ex.: 50 80). Omitido, a taxa "
+                             "fica constante")
+    parser.add_argument("--lr-decay-gamma", type=float, default=0.1,
+                        help="Fator aplicado à taxa de aprendizado em cada época "
+                             "de --lr-decay-epochs")
     parser.add_argument("--patch-size", type=int, default=256,
                         help="Tamanho do recorte HR para treino")
     parser.add_argument("--patches-per-image", type=int, default=1,
@@ -274,6 +282,7 @@ def train(args):
 
     dataloader = get_dataloader(args.data_dir, batch_size=args.batch_size,
                                 num_workers=args.num_workers,
+                                pin_memory=device.type == "cuda",
                                 patch_size=args.patch_size, lr_scale=args.lr_scale,
                                 patches_per_image=args.patches_per_image,
                                 fits_normalization=args.fits_normalization,
@@ -292,6 +301,21 @@ def train(args):
     mtf_log_path = os.path.join(os.path.dirname(args.log_file) or ".",
                                 "step_edge_mtf.csv")
 
+    # Decaimento da taxa de aprendizado: o artigo original reduz a taxa depois
+    # de um número fixo de iterações. Aqui as marcas são em épocas, e o
+    # scheduler acompanha os dois otimizadores para que G e D não fiquem com
+    # taxas descasadas.
+    schedulers = None
+    if args.lr_decay_epochs:
+        schedulers = {
+            "G": optim.lr_scheduler.MultiStepLR(optimizer_G, args.lr_decay_epochs,
+                                                gamma=args.lr_decay_gamma),
+            "D": optim.lr_scheduler.MultiStepLR(optimizer_D, args.lr_decay_epochs,
+                                                gamma=args.lr_decay_gamma),
+        }
+        print(f"Taxa de aprendizado decai x{args.lr_decay_gamma} nas épocas "
+              f"{args.lr_decay_epochs}", flush=True)
+
     # --- Retomada de checkpoint (opcional) ---
     # Escolhas que mudam o modelo ou o objetivo viajam com o checkpoint
     arquitetura = {"discriminator": args.discriminator, "vgg_layer": args.vgg_layer}
@@ -301,7 +325,8 @@ def train(args):
         start_epoch = load_checkpoint(args.resume, generator, discriminator,
                                       optimizer_G, optimizer_D, device,
                                       arquitetura=arquitetura,
-                                      scalers={"G": scaler_G, "D": scaler_D})
+                                      scalers={"G": scaler_G, "D": scaler_D},
+                                      schedulers=schedulers)
 
     # --- 5. Loop de Treinamento ---
     for epoch in range(start_epoch, args.epochs):
@@ -448,12 +473,21 @@ def train(args):
                 "ssim_last_batch": f"{epoch_ssim:.4f}",
             })
 
+        # Decaimento da taxa, uma vez por época
+        if schedulers is not None:
+            for s in schedulers.values():
+                s.step()
+            if (epoch + 1) in args.lr_decay_epochs:
+                print(f"Taxa de aprendizado agora em "
+                      f"{optimizer_G.param_groups[0]['lr']:.3e}", flush=True)
+
         # --- 7. Checkpoints (Fim de cada época) ---
         # Checkpoint retomável (modelos + otimizadores + época + RNG) toda época
         save_checkpoint(os.path.join(args.weights_dir, "checkpoint_last.pth"),
                         epoch, generator, discriminator, optimizer_G, optimizer_D,
                         arquitetura=arquitetura,
-                        scalers={"G": scaler_G, "D": scaler_D})
+                        scalers={"G": scaler_G, "D": scaler_D},
+                        schedulers=schedulers)
 
         # Salva amostras visuais e os pesos do modelo
         if (epoch + 1) % args.sample_interval == 0 or epoch == 0:

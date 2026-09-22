@@ -266,13 +266,18 @@ class StepEdgeDataset(Dataset):
 
 def get_dataloader(root_dir, batch_size=8, shuffle=True, num_workers=4,
                    patch_size=256, lr_scale=4, patches_per_image=1,
-                   fits_normalization="minmax", fits_range=None):
+                   pin_memory=False, fits_normalization="minmax", fits_range=None):
     dataset = NeutronDataset(root_dir, patch_size=patch_size, lr_scale=lr_scale,
                              patches_per_image=patches_per_image,
                              fits_normalization=fits_normalization,
                              fits_range=fits_range)
+    # pin_memory acelera a transferência para a GPU; persistent_workers evita
+    # recriar os processos de leitura a cada época, o que pesa quando a época é
+    # curta e há muitos workers.
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,
-                      num_workers=num_workers, drop_last=True)
+                      num_workers=num_workers, drop_last=True,
+                      pin_memory=pin_memory,
+                      persistent_workers=num_workers > 0)
 
 def get_step_edge_loader(root_dir="data/step_edges", patch_size=512, lr_scale=4,
                          num_workers=0, fits_normalization="minmax", fits_range=None):

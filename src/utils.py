@@ -95,7 +95,7 @@ def save_model_weights(generator, discriminator, epoch, save_dir="weights"):
     torch.save(unwrap(discriminator).state_dict(), os.path.join(save_dir, f"disc_epoch_{epoch}.pth"))
 
 def save_checkpoint(path, epoch, generator, discriminator, optimizer_G, optimizer_D,
-                    arquitetura=None, scalers=None):
+                    arquitetura=None, scalers=None, schedulers=None):
     """
     Salva um checkpoint COMPLETO e retomável do treinamento: modelos, otimizadores,
     época atual e estado dos geradores de números aleatórios (RNG). Diferente de
@@ -121,6 +121,8 @@ def save_checkpoint(path, epoch, generator, discriminator, optimizer_G, optimize
         # escala do zero, com algumas iterações descartadas por overflow.
         "scalers": ({k: s.state_dict() for k, s in scalers.items()}
                     if scalers else None),
+        "schedulers": ({k: s.state_dict() for k, s in schedulers.items()}
+                       if schedulers else None),
         "rng": {
             "torch": torch.get_rng_state(),
             "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
@@ -131,7 +133,7 @@ def save_checkpoint(path, epoch, generator, discriminator, optimizer_G, optimize
     torch.save(state, path)
 
 def load_checkpoint(path, generator, discriminator, optimizer_G, optimizer_D, device,
-                    arquitetura=None, scalers=None):
+                    arquitetura=None, scalers=None, schedulers=None):
     """
     Restaura um checkpoint salvo por save_checkpoint e retorna a época em que
     o treino deve recomeçar (época salva + 1). Também restaura o estado dos RNGs
@@ -170,6 +172,12 @@ def load_checkpoint(path, generator, discriminator, optimizer_G, optimizer_D, de
         for k, s in scalers.items():
             if k in gravados and gravados[k] is not None:
                 s.load_state_dict(gravados[k])
+
+    agendados = state.get("schedulers")
+    if schedulers and agendados:
+        for k, s in schedulers.items():
+            if k in agendados and agendados[k] is not None:
+                s.load_state_dict(agendados[k])
 
     rng = state.get("rng")
     if rng is not None:

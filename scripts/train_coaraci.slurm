@@ -95,7 +95,10 @@ python -u -m src.train \
     --pretrain-epochs 5 \
     --batch-size 16 \
     --lr 1e-4 \
+    --lr-decay-epochs 50 80 \
     --patch-size 256 \
+    --patches-per-image 100 \
+    --amp \
     --num-workers "${SLURM_CPUS_PER_TASK}" \
     --seed 42 \
     ${ARG_RESUME}

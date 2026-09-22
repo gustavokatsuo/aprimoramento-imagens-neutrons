@@ -93,6 +93,8 @@ Para executar este projeto localmente, é recomendável a utilização de um amb
 
 3. **Colocar os dados** em `data/raw/` (e, opcionalmente, os phantoms de borda em `data/step_edges/`). As imagens precisam ser maiores ou iguais ao `--patch-size` usado no treino.
 
+> **Tamanho da época.** Cada radiografia rende `--patches-per-image` recortes aleatórios por época. Com o padrão `1`, um conjunto de 30 imagens dá uma época de 30 amostras — longe do necessário para treinar uma GAN. Para treino real, use dezenas ou centenas; o script avisa quando a época tem menos de 100 amostras.
+
 ---
 
 ## Como Executar
@@ -114,6 +116,7 @@ Argumentos mais usados:
 | `--pretrain-epochs` | `5` | épocas iniciais só com MSE; `0` desativa |
 | `--batch-size` | `8` | batch total (dividido entre GPUs, se houver mais de uma) |
 | `--patch-size` | `256` | tamanho do recorte HR |
+| `--patches-per-image` | `1` | recortes por radiografia em cada época |
 | `--lr` | `1e-4` | taxa de aprendizado |
 | `--seed` | `42` | semente para reprodutibilidade |
 | `--run-dir` | — | agrupa config, logs, pesos e amostras desta execução |
@@ -122,6 +125,8 @@ Argumentos mais usados:
 | `--vgg-layer` | `relu3_4` | profundidade da VGG na content loss |
 | `--content-weight` | `1.0` | peso da content loss (`0.006` = rescale do artigo) |
 | `--discriminator` | `compacto` | `compacto` ou `artigo` (Ledig et al. 2017) |
+| `--amp` | desligado | precisão mista na GPU (menos memória, mais rápido) |
+| `--lr-decay-epochs` | — | épocas em que a taxa decai (ex.: `50 80`) |
 
 `python -m src.train --help` lista todos.
 
