@@ -158,15 +158,22 @@ class NeutronDataset(Dataset):
             # apenas 256 — destruindo a precisão radiométrica do detector.
             img = torch.from_numpy(img_array).unsqueeze(0)
 
-            # --- 1. Ajuste de Tamanho ---
+            # --- 1. Conferência de Tamanho ---
+            # O ajuste anterior redimensionava com max(h, patch) por eixo, o que
+            # escala SÓ o eixo deficiente: um recorte 200x300 virava 256x300,
+            # esticando 28% na vertical e deformando a geometria da amostra.
+            # Num pipeline cuja finalidade é MEDIR resolução, interpolar a
+            # entrada para cima antes de degradá-la de novo inventa informação
+            # que as métricas depois contabilizam como ganho. Melhor recusar e
+            # deixar a escolha explícita.
             _, h, w = img.shape
-            if w < self.patch_size or h < self.patch_size:
-                img = TF.resize(
-                    img,
-                    (max(h, self.patch_size), max(w, self.patch_size)),
-                    interpolation=transforms.InterpolationMode.BICUBIC,
-                    antialias=True,
-                ).clamp(0.0, 1.0)
+            if h < self.patch_size or w < self.patch_size:
+                raise ValueError(
+                    f"'{os.path.basename(img_path)}' tem {h}x{w}, menor que "
+                    f"patch_size={self.patch_size} em ao menos um eixo. Use "
+                    f"--patch-size {min(h, w)} ou menor, ou tire esta imagem "
+                    f"do conjunto de treino."
+                )
 
             # --- 2. Extração de Patch Aleatório ---
             i, j, h_crop, w_crop = transforms.RandomCrop.get_params(
