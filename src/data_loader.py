@@ -18,6 +18,17 @@ except ImportError:
 # Extensões suportadas (a ordem não importa; a lista final é ordenada)
 SUPPORTED_EXTENSIONS = ("*.tiff", "*.tif", "*.png", "*.jpg", "*.fits")
 
+def list_supported_images(root_dir):
+    """
+    Lista ordenada dos arquivos de imagem suportados em root_dir. A ordenação
+    mantém a indexação do Dataset estável entre execuções (reprodutibilidade),
+    e ter a listagem isolada permite checar o dataset antes de montar o loader.
+    """
+    return sorted(
+        f for ext in SUPPORTED_EXTENSIONS
+        for f in glob.glob(os.path.join(root_dir, ext))
+    )
+
 def load_image_as_array(img_path, fits_normalization="minmax", fits_range=None):
     """
     Carrega uma imagem científica como numpy float32 2D no intervalo [0, 1].
@@ -100,10 +111,7 @@ class NeutronDataset(Dataset):
         lr_scale: Fator de redução para a imagem de baixa resolução.
         fits_normalization / fits_range: ver load_image_as_array (só afetam .fits).
         """
-        self.files = sorted(
-            f for ext in SUPPORTED_EXTENSIONS
-            for f in glob.glob(os.path.join(root_dir, ext))
-        )
+        self.files = list_supported_images(root_dir)
 
         self.patch_size = patch_size
         self.lr_scale = lr_scale
@@ -179,10 +187,7 @@ class StepEdgeDataset(Dataset):
     """
     def __init__(self, root_dir="data/step_edges", patch_size=512, lr_scale=4,
                  fits_normalization="minmax", fits_range=None):
-        self.files = sorted(
-            f for ext in SUPPORTED_EXTENSIONS
-            for f in glob.glob(os.path.join(root_dir, ext))
-        )
+        self.files = list_supported_images(root_dir)
         self.patch_size = patch_size
         self.lr_scale = lr_scale
         self.fits_normalization = fits_normalization

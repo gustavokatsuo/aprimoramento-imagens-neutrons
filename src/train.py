@@ -10,7 +10,8 @@ import torch.optim as optim
 
 # Importações dos seus módulos locais
 from src.model import Generator, Discriminator, FeatureExtractorVGG
-from src.data_loader import get_dataloader, get_step_edge_loader
+from src.data_loader import (get_dataloader, get_step_edge_loader,
+                             list_supported_images, SUPPORTED_EXTENSIONS)
 from src.utils import (calculate_psnr, calculate_ssim, save_samples,
                        save_model_weights, save_checkpoint, load_checkpoint,
                        log_epoch_csv, denormalize, mtf_from_edge,
@@ -130,9 +131,24 @@ def train(args):
     optimizer_D = optim.Adam(discriminator.parameters(), lr=args.lr, betas=(0.9, 0.999))
 
     # --- 4. Carregamento de Dados ---
-    # Se a pasta estiver vazia, o script avisará
-    if not os.path.exists(args.data_dir) or len(os.listdir(args.data_dir)) == 0:
-        print(f"AVISO: Nenhuma imagem encontrada em '{args.data_dir}'. Coloque imagens de teste para rodar.")
+    if not os.path.exists(args.data_dir):
+        print(f"AVISO: A pasta '{args.data_dir}' não existe. Coloque as radiografias lá para rodar.")
+        return
+
+    # Valida o dataset ANTES de construir o loader: com dataset vazio o próprio
+    # DataLoader estoura (o sampler exige num_samples > 0) e, com menos imagens
+    # que o batch, drop_last=True produz zero batches — nesse caso o erro só
+    # apareceria no fim da primeira época, tarde demais num job de cluster.
+    # Contar arquivos da pasta não serve: conta qualquer arquivo, não só imagens.
+    n_imgs = len(list_supported_images(args.data_dir))
+    if n_imgs == 0:
+        print(f"AVISO: Nenhuma imagem suportada em '{args.data_dir}' "
+              f"(extensões aceitas: {', '.join(SUPPORTED_EXTENSIONS)}).")
+        return
+    if n_imgs < args.batch_size:
+        print(f"AVISO: {n_imgs} imagem(ns) em '{args.data_dir}' para --batch-size "
+              f"{args.batch_size}. Como o loader usa drop_last=True, nenhum batch "
+              f"se forma. Use --batch-size {n_imgs} ou menos.")
         return
 
     dataloader = get_dataloader(args.data_dir, batch_size=args.batch_size,
@@ -286,7 +302,10 @@ def train(args):
 
         # Salva amostras visuais e os pesos do modelo
         if (epoch + 1) % args.sample_interval == 0 or epoch == 0:
-            save_samples(epoch, imgs_lr, imgs_hr, gen_hr)
+            # imgs_lr/imgs_hr/gen_hr vêm do loop de batches: só existem se a
+            # época processou ao menos um
+            if n_batches > 0:
+                save_samples(epoch, imgs_lr, imgs_hr, gen_hr)
             save_model_weights(generator, discriminator, epoch, save_dir=args.weights_dir)
             if step_edge_loader is not None:
                 validate_step_edges(generator, step_edge_loader, device, epoch)
