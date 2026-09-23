@@ -84,12 +84,22 @@ Para executar este projeto localmente, é recomendável a utilização de um amb
    cd aprimoramento-imagens-neutrons
    ```
 
-2. **Instalar as dependências:**
+2. **Instalar as dependências** (testado em Python 3.11):
    ```bash
    python -m venv venv
    venv/bin/python -m pip install -r requirements.txt
    ```
-   *(Certifique-se de que as bibliotecas `torch` e `torchvision` estão configuradas corretamente para a sua versão do CUDA — pode ser necessário instalá-las a partir do índice correspondente, ex.: `--index-url https://download.pytorch.org/whl/cu124`).*
+
+   **Em máquina com GPU**, instale `torch` e `torchvision` *antes*, a partir do
+   índice correspondente ao runtime CUDA do sistema — caso contrário o pip traz
+   o build do índice padrão, que pode não casar com os drivers:
+   ```bash
+   venv/bin/python -m pip install torch==2.13.0 torchvision==0.28.0 \
+       --index-url https://download.pytorch.org/whl/cu124
+   venv/bin/python -m pip install -r requirements.txt
+   ```
+   Confirme a versão de CUDA com `nvidia-smi` ou com o suporte do cluster
+   (`cu121`, `cu124`, `cu126`… variam por instalação).
 
 3. **Colocar os dados** em `data/raw/` (e, opcionalmente, os phantoms de borda em `data/step_edges/`). As imagens precisam ser maiores ou iguais ao `--patch-size` usado no treino.
 
