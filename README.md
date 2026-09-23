@@ -178,7 +178,17 @@ Para retomar um treino interrompido:
 sbatch --export=ALL,RESUME=runs/<job>/weights/checkpoint_last.pth scripts/train_coaraci.slurm
 ```
 
-> O script ainda tem placeholders (`<PARTICAO>`, `<CONTA>`, `<N_GPUS>`, `<TEMPO_MAXIMO>`, `<MODULOS>`, `<RAIZ_SCRATCH>`) a preencher com os dados do cluster antes da primeira submissão.
+O script foi feito para submeter **sem editar o arquivo**: o que varia por instalação vem da linha de comando ou do ambiente, e as diretivas `#SBATCH` são apenas defaults, que qualquer opção passada ao `sbatch` sobrepõe.
+
+```bash
+sbatch scripts/train_coaraci.slurm                            # tenta com os defaults
+sbatch -p gpu -A meu-projeto scripts/train_coaraci.slurm      # partição e conta
+sbatch --export=ALL,MODULOS="python/3.11 cuda/12.4" scripts/train_coaraci.slurm
+```
+
+Partição e conta ficam fora do arquivo de propósito: seus nomes variam por cluster e um valor errado faz o `sbatch` recusar o job de imediato. Sem a diretiva, o SLURM usa a partição padrão do site e dispensa a conta quando ela não é exigida. A raiz do scratch é descoberta na ordem `$SCRATCH_RAIZ`, `$SCRATCH`, `$SLURM_TMPDIR`, `$TMPDIR` e, em último caso, uma pasta dentro do projeto.
+
+Se a primeira submissão for recusada, o próprio SLURM diz o que falta (`Invalid partition`, `Invalid account`); os nomes corretos saem de `sinfo -o "%P %G %l"` e `sacctmgr show assoc user=$USER format=account`.
 
 ### Experimento: profundidade da VGG e peso do termo adversarial
 

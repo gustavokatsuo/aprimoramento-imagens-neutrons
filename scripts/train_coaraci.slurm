@@ -2,46 +2,62 @@
 #===============================================================================
 # Treinamento SRGAN no cluster Coaraci (SLURM)
 #
-# Ainda falta preencher (peça ao suporte do Coaraci, ou copie do script SLURM
-# do orientador, que já roda no cluster):
+# Feito para ser submetido SEM editar o arquivo: os valores que variam por
+# instalação vêm da linha de comando ou do ambiente, e as diretivas abaixo são
+# só defaults. Opções passadas ao sbatch têm precedência sobre elas.
 #
-#   <PARTICAO>       fila com GPU           -> sinfo -o "%P %G %l"
-#   <CONTA>          conta de alocação      -> sacctmgr show assoc user=$USER format=account
-#   <N_GPUS>         GPUs por job
-#   <TEMPO_MAXIMO>   walltime HH:MM:SS      (ex.: 24:00:00)
-#   <MODULOS>        módulos a carregar     -> module avail
-#   <RAIZ_SCRATCH>   raiz do scratch do nó  (ex.: /scratch/$USER)
+#   sbatch scripts/train_coaraci.slurm                      # tenta com os defaults
+#   sbatch -p gpu -A meu-projeto scripts/train_coaraci.slurm
+#   sbatch --export=ALL,MODULOS="python/3.11 cuda/12.4" scripts/train_coaraci.slurm
 #
-# Submissão:  sbatch scripts/train_coaraci.slurm
-# Fila:       squeue -u $USER
-# Retomada:   sbatch --export=ALL,RESUME=runs/<job>/weights/checkpoint_last.pth \
-#                    scripts/train_coaraci.slurm
+# Se a primeira submissão for recusada, o próprio SLURM diz o que falta
+# ("Invalid partition", "Invalid account"); descubra os nomes com:
+#
+#   sinfo -o "%P %G %l"                              partições, GPUs e walltime
+#   sacctmgr show assoc user=$USER format=account    contas de alocação
+#   module avail                                     módulos disponíveis
+#   echo "$SCRATCH"                                  raiz do scratch, se definida
+#
+# Fila:      squeue -u $USER
+# Retomada:  sbatch --export=ALL,RESUME=runs/<job>/weights/checkpoint_last.pth \
+#                   scripts/train_coaraci.slurm
 #===============================================================================
 
 #SBATCH --job-name=srgan-neutrons
-#SBATCH --partition=<PARTICAO>
-#SBATCH --account=<CONTA>
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --gres=gpu:<N_GPUS>
-#SBATCH --time=<TEMPO_MAXIMO>
+#SBATCH --gres=gpu:1
+#SBATCH --time=24:00:00
 #SBATCH --output=out_%j.txt
 #SBATCH --error=err_%j.txt
+#
+# Partição e conta ficam DE FORA de propósito: seus nomes variam por cluster e
+# um valor errado faz o sbatch recusar o job na hora. Sem a diretiva, o SLURM
+# usa a partição padrão do site e dispensa a conta quando ela não é exigida.
+# Passe-as no sbatch quando for necessário:  sbatch -p <fila> -A <conta> ...
 
 set -euo pipefail
 
-MODULOS="<MODULOS>"
-SCRATCH_RAIZ="<RAIZ_SCRATCH>"
+# Módulos a carregar. Vazio = nenhum, o que basta quando o venv já traz tudo.
+MODULOS="${MODULOS:-}"
+
+# Raiz do scratch, na ordem de preferência: o que foi passado no ambiente, as
+# variáveis que os sites costumam definir, e por último o diretório do projeto
+# (funciona, mas lê do filesystem compartilhado durante todo o treino).
+SCRATCH_RAIZ="${SCRATCH_RAIZ:-${SCRATCH:-${SLURM_TMPDIR:-${TMPDIR:-${SLURM_SUBMIT_DIR}/scratch-local}}}}"
 
 PROJETO="${SLURM_SUBMIT_DIR}"
 TRABALHO="${SCRATCH_RAIZ}/srgan-${SLURM_JOB_ID}"
 
 echo "[$(hostname)] job ${SLURM_JOB_ID} | projeto ${PROJETO} | scratch ${TRABALHO}"
+echo "GPUs visíveis: ${CUDA_VISIBLE_DEVICES:-nenhuma} | CPUs: ${SLURM_CPUS_PER_TASK}"
 
 # --- Ambiente ---------------------------------------------------------------
-module purge
-module load ${MODULOS}
+if [[ -n "${MODULOS}" ]]; then
+    module purge
+    module load ${MODULOS}
+fi
 source "${PROJETO}/venv/bin/activate"
 
 # Explícito, em vez de contar com o SLURM iniciar no diretório de submissão:
