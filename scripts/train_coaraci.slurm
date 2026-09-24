@@ -114,6 +114,11 @@ python -u -m src.train \
     --lr-decay-epochs 50 80 \
     --patch-size 256 \
     --patches-per-image 100 \
+    --val-fraction 0.10 \
+    --test-fraction 0.10 \
+    --split-gap 30 \
+    --min-nonzero 0.5 \
+    --cache-images 500 \
     --amp \
     --num-workers "${SLURM_CPUS_PER_TASK}" \
     --seed 42 \

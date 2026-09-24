@@ -12,7 +12,8 @@ import torch.optim as optim
 from src.model import (Generator, Discriminator, FeatureExtractorVGG,
                        CAMADAS_VGG)
 from src.data_loader import (get_dataloader, get_step_edge_loader,
-                             list_supported_images, SUPPORTED_EXTENSIONS)
+                             list_supported_images, dividir_pilha,
+                             SUPPORTED_EXTENSIONS)
 from src.utils import (calculate_psnr, calculate_ssim, save_samples,
                        save_model_weights, save_checkpoint, load_checkpoint,
                        log_epoch_csv, save_run_config, denormalize,
@@ -112,6 +113,19 @@ def parse_args():
     parser.add_argument("--tiff-range", type=float, nargs=2, default=None,
                         metavar=("LO", "HI"),
                         help="Faixa explícita (lo hi) quando --tiff-normalization=range")
+    parser.add_argument("--val-fraction", type=float, default=0.0,
+                        help="Fração das imagens reservada para validação, tomada "
+                             "como BLOCO CONTÍGUO ao final da pilha. Divisão "
+                             "aleatória não serve: fatias vizinhas de um volume "
+                             "são quase idênticas (SSIM 0,97 nestes dados)")
+    parser.add_argument("--test-fraction", type=float, default=0.0,
+                        help="Fração reservada para teste, em bloco contíguo. Fica "
+                             "intocada durante o treino")
+    parser.add_argument("--split-gap", type=int, default=0,
+                        help="Fatias descartadas nas fronteiras entre os blocos, "
+                             "para que a mesma estrutura não apareça em dois "
+                             "conjuntos. Precisa exceder a extensão em z das "
+                             "estruturas de interesse")
     parser.add_argument("--cache-images", type=int, default=0,
                         help="Imagens normalizadas mantidas em memória (0 = sem "
                              "cache, -1 = todas). Evita renormalizar a imagem "
@@ -155,6 +169,31 @@ def set_seed(seed):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+def avaliar(generator, loader, device, usar_amp=False):
+    """
+    PSNR e SSIM médios sobre um conjunto que NÃO entra no gradiente.
+
+    É a única métrica do CSV que mede generalização: as colunas 'psnr' e
+    'ssim_last_batch' são calculadas sobre os mesmos patches que treinaram o
+    Gerador, e sobem mesmo quando o modelo apenas decora. Depende de o conjunto
+    ter sido separado em bloco contíguo (ver data_loader.dividir_pilha).
+    """
+    generator.eval()
+    soma_psnr = soma_ssim = 0.0
+    n = 0
+    with torch.no_grad():
+        for batch in loader:
+            imgs_lr = batch["lr"].to(device)
+            imgs_hr = batch["hr"].to(device)
+            with torch.amp.autocast(device.type, enabled=usar_amp):
+                gen_hr = generator(imgs_lr)
+            gen_hr = gen_hr.float()
+            soma_psnr += calculate_psnr(gen_hr, imgs_hr).item()
+            soma_ssim += calculate_ssim(gen_hr, imgs_hr).item()
+            n += 1
+    generator.train()
+    return (soma_psnr / n, soma_ssim / n) if n else (float("nan"), float("nan"))
 
 def validate_step_edges(generator, loader, device, epoch, log_path="logs/step_edge_mtf.csv"):
     """
@@ -285,6 +324,21 @@ def train(args):
               f"(extensões aceitas: {', '.join(SUPPORTED_EXTENSIONS)}).", flush=True)
         return
 
+    # --- Divisão treino / validação / teste, em blocos contíguos ---
+    todos = list_supported_images(args.data_dir)
+    arq_treino, arq_val, arq_teste = dividir_pilha(
+        todos, args.val_fraction, args.test_fraction, args.split_gap)
+    if (arq_val or arq_teste) and args.split_gap == 0:
+        print("AVISO: --split-gap 0 com divisão ativa. Fatias na fronteira entre "
+              "os blocos são quase idênticas (SSIM ~0,97 entre vizinhas nestes "
+              "dados) e a mesma estrutura aparecerá em dois conjuntos, inflando "
+              "a métrica de validação.", flush=True)
+    if arq_val or arq_teste:
+        print(f"Divisão contígua: {len(arq_treino)} treino | {len(arq_val)} validação | "
+              f"{len(arq_teste)} teste | {len(todos)-len(arq_treino)-len(arq_val)-len(arq_teste)} "
+              f"descartadas nas margens", flush=True)
+    n_imgs = len(arq_treino)
+
     n_amostras = n_imgs * args.patches_per_image
     if n_amostras < args.batch_size:
         print(f"AVISO: {n_imgs} imagem(ns) x {args.patches_per_image} patch(es) = "
@@ -305,6 +359,7 @@ def train(args):
                                 num_workers=args.num_workers,
                                 pin_memory=device.type == "cuda",
                                 patch_size=args.patch_size, lr_scale=args.lr_scale,
+                                arquivos=arq_treino,
                                 patches_per_image=args.patches_per_image,
                                 min_nonzero=args.min_nonzero,
                                 cache_images=args.cache_images,
@@ -312,6 +367,23 @@ def train(args):
                                 fits_range=args.fits_range,
                                 tiff_normalization=args.tiff_normalization,
                                 tiff_range=args.tiff_range)
+
+    # Loader de validação: mesmo pipeline, sem embaralhar, para que a métrica
+    # seja comparável entre épocas.
+    val_loader = None
+    if arq_val:
+        val_loader = get_dataloader(args.data_dir, batch_size=args.batch_size,
+                                    shuffle=False, num_workers=args.num_workers,
+                                    pin_memory=device.type == "cuda",
+                                    arquivos=arq_val, drop_last=False,
+                                    patch_size=args.patch_size, lr_scale=args.lr_scale,
+                                    patches_per_image=args.patches_per_image,
+                                    min_nonzero=args.min_nonzero,
+                                    cache_images=args.cache_images,
+                                    fits_normalization=args.fits_normalization,
+                                    fits_range=args.fits_range,
+                                    tiff_normalization=args.tiff_normalization,
+                                    tiff_range=args.tiff_range)
 
     # Phantoms de borda (opcional): usados só em validação MTF, nunca na loss
     step_edge_loader = get_step_edge_loader(args.step_edge_dir,
@@ -479,6 +551,10 @@ def train(args):
             with torch.no_grad():
                 epoch_ssim = calculate_ssim(gen_hr.float(), imgs_hr).item()
             n_gan = n_batches if not pretraining else 1  # evita divisão por zero
+
+            # Métrica de generalização: conjunto separado, fora do gradiente
+            val_psnr, val_ssim = (avaliar(generator, val_loader, device, usar_amp)
+                                  if val_loader is not None else (float("nan"),) * 2)
             # loss_content vai para colunas SEPARADAS por fase. No pré-treino
             # ela é MSE pixel-a-pixel; na fase GAN é MSE sobre features da VGG.
             # São grandezas de escalas diferentes (medidas: ~0.29 e ~9.5 nos
@@ -498,7 +574,13 @@ def train(args):
                 "D_fake_prob": f"{sums['d_fake'] / n_gan:.4f}" if not pretraining else "",
                 "psnr": f"{sums['psnr'] / n_batches:.3f}",
                 "ssim_last_batch": f"{epoch_ssim:.4f}",
+                "val_psnr": "" if math.isnan(val_psnr) else f"{val_psnr:.3f}",
+                "val_ssim": "" if math.isnan(val_ssim) else f"{val_ssim:.4f}",
             })
+            if not math.isnan(val_psnr):
+                print(f"[Validação] época {epoch}: PSNR {val_psnr:.2f} dB | "
+                      f"SSIM {val_ssim:.4f}  ({len(val_loader.dataset)} amostras)",
+                      flush=True)
 
         # Decaimento da taxa, uma vez por época
         if schedulers is not None:

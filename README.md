@@ -33,6 +33,29 @@ A mesma faixa em todas as fatias preserva a comparabilidade radiométrica entre 
 
 **Área útil.** Reconstruções tomográficas têm um círculo útil inscrito na imagem e zeros nos cantos — nestes dados, 24,7% da área. Sem filtro, 11,3% dos recortes aleatórios de 256 px caem majoritariamente fora do círculo e ensinariam o Gerador a reproduzir vazio. `--min-nonzero 0.5` resorteia o recorte até que ao menos metade tenha conteúdo, levando esse número a zero.
 
+### Divisão treino / validação / teste
+
+**Divisão aleatória invalida o resultado.** Fatias vizinhas de um mesmo volume tomográfico são quase a mesma imagem — medido nas fatias 2028–2030 deste conjunto:
+
+| par | distância | correlação | SSIM |
+|---|---|---|---|
+| 2028 vs 2029 | 1 fatia | 0,9962 | **0,9688** |
+| 2028 vs 2030 | 2 fatias | 0,9875 | 0,9165 |
+| par não relacionado | — | −0,0003 | 0,0055 |
+
+Sorteadas, o conjunto de teste conteria quase-duplicatas do treino e a métrica final não mediria generalização alguma. A divisão é feita em **blocos contíguos** ao longo de z:
+
+```bash
+python -m src.train --data-dir data/raw \
+    --val-fraction 0.10 --test-fraction 0.10 --split-gap 30
+```
+
+`--split-gap` descarta fatias nas fronteiras para que a mesma estrutura não apareça em dois conjuntos. A margem precisa exceder a extensão em z das estruturas de interesse: com voxel de 3,65 µm, as partículas de 35,7 µm do segundo pico da amostra atravessam cerca de 10 fatias.
+
+As colunas `val_psnr` e `val_ssim` do CSV são as **únicas** que medem generalização — `psnr` e `ssim_last_batch` são calculadas sobre os mesmos patches que treinaram o Gerador e sobem mesmo quando o modelo apenas decora. O bloco de teste fica intocado durante o treino.
+
+> A ordenação dos arquivos é **natural**, não alfabética: `10.tiff` vem depois de `9.tiff`. Sem isso, um bloco contíguo na lista seria descontíguo no volume.
+
 **Cache.** Sem cache, cada recorte relê e renormaliza a imagem inteira para extrair 256×256 pixels dela: 4,8 ms de leitura (servida pelo cache de página do sistema) e 28,3 ms normalizando 4,1 milhões de pixels. Com `--patches-per-image` alto, essa renormalização repetida domina o carregamento. `--cache-images` guarda as imagens já normalizadas e reduz o custo por recorte de **29,3 ms para 1,8 ms — 16×**.
 
 O cache vive em cada processo do DataLoader, então a memória é `cache × num_workers`. Nas 2030 fatias, o cache completo ocupa 31,1 GiB por worker. Como o cache remove o gargalo, poucos workers com cache grande rendem mais que muitos workers sem cache — por exemplo `--num-workers 2 --cache-images 500` cabe em ~15 GiB no total.
@@ -144,6 +167,9 @@ Argumentos mais usados:
 | `--tiff-normalization` | `dtype` | `dtype`, `range` ou `minmax` (ver abaixo) |
 | `--min-nonzero` | `0.0` | fração mínima de pixels não-nulos num recorte |
 | `--cache-images` | `0` | imagens normalizadas mantidas em memória (`-1` = todas) |
+| `--val-fraction` | `0.0` | fração reservada para validação, em bloco contíguo |
+| `--test-fraction` | `0.0` | fração reservada para teste, em bloco contíguo |
+| `--split-gap` | `0` | fatias descartadas entre os blocos |
 | `--lr` | `1e-4` | taxa de aprendizado |
 | `--seed` | `42` | semente para reprodutibilidade |
 | `--run-dir` | — | agrupa config, logs, pesos e amostras desta execução |

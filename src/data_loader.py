@@ -1,6 +1,7 @@
 import os
 import glob
 import random
+import re
 from PIL import Image
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -18,16 +19,75 @@ except ImportError:
 # Extensões suportadas (a ordem não importa; a lista final é ordenada)
 SUPPORTED_EXTENSIONS = ("*.tiff", "*.tif", "*.png", "*.jpg", "*.fits")
 
+def _chave_natural(caminho):
+    """
+    Chave de ordenação que trata sequências de dígitos como números.
+
+    Necessária porque a ordem alfabética coloca '1000.tiff' antes de '11.tiff'.
+    Numa pilha tomográfica a ordem da lista É a ordem em z, e a divisão em
+    blocos contíguos (ver dividir_pilha) depende disso: com a ordem alfabética,
+    um bloco contíguo na lista seria descontíguo no volume.
+    """
+    nome = os.path.basename(caminho)
+    return [int(p) if p.isdigit() else p.lower() for p in re.split(r"(\d+)", nome)]
+
 def list_supported_images(root_dir):
     """
-    Lista ordenada dos arquivos de imagem suportados em root_dir. A ordenação
-    mantém a indexação do Dataset estável entre execuções (reprodutibilidade),
-    e ter a listagem isolada permite checar o dataset antes de montar o loader.
+    Lista ordenada dos arquivos de imagem suportados em root_dir, em ordem
+    NATURAL. A ordenação mantém a indexação do Dataset estável entre execuções
+    (reprodutibilidade), e ter a listagem isolada permite checar o dataset antes
+    de montar o loader.
     """
     return sorted(
-        f for ext in SUPPORTED_EXTENSIONS
-        for f in glob.glob(os.path.join(root_dir, ext))
+        (f for ext in SUPPORTED_EXTENSIONS
+         for f in glob.glob(os.path.join(root_dir, ext))),
+        key=_chave_natural,
     )
+
+def dividir_pilha(arquivos, val_fraction=0.0, test_fraction=0.0, gap=0):
+    """
+    Divide uma pilha de imagens em blocos CONTÍGUOS de treino, validação e teste.
+
+    Divisão aleatória não serve aqui. Fatias vizinhas de um mesmo volume são
+    quase a mesma imagem — medido nestas reconstruções, SSIM de 0,969 entre
+    fatias adjacentes, contra 0,006 para um par não relacionado. Sorteadas, o
+    conjunto de teste conteria quase-duplicatas do treino e a métrica final não
+    mediria generalização nenhuma.
+
+    O layout é [treino] gap [validação] gap [teste], com 'gap' fatias
+    descartadas nas fronteiras. A margem precisa ser maior que a extensão em z
+    das estruturas de interesse, senão a mesma partícula aparece dos dois lados:
+    com voxel de 3,65 um, as partículas de 35,7 um do segundo pico da amostra
+    atravessam cerca de 10 fatias.
+
+    Retorna (treino, validacao, teste) como listas de caminhos.
+    """
+    n = len(arquivos)
+    n_val = int(n * val_fraction)
+    n_test = int(n * test_fraction)
+    n_gaps = (gap if n_val else 0) + (gap if n_test else 0)
+    n_treino = n - n_val - n_test - n_gaps
+
+    if n_treino <= 0:
+        raise ValueError(
+            f"Divisão impossível: {n} imagem(ns) para val={val_fraction}, "
+            f"test={test_fraction} e gap={gap} não deixam nada para treino."
+        )
+
+    i = n_treino
+    treino = arquivos[:i]
+    if n_val:
+        i += gap
+        validacao = arquivos[i:i + n_val]
+        i += n_val
+    else:
+        validacao = []
+    if n_test:
+        i += gap
+        teste = arquivos[i:i + n_test]
+    else:
+        teste = []
+    return treino, validacao, teste
 
 def load_image_as_array(img_path, fits_normalization="minmax", fits_range=None,
                         tiff_normalization="dtype", tiff_range=None):
@@ -155,7 +215,7 @@ def load_image_as_array(img_path, fits_normalization="minmax", fits_range=None,
     return img_array
 
 class NeutronDataset(Dataset):
-    def __init__(self, root_dir, patch_size=256, lr_scale=4,
+    def __init__(self, root_dir, patch_size=256, lr_scale=4, arquivos=None,
                  patches_per_image=1, min_nonzero=0.0, max_tentativas=10,
                  cache_images=0,
                  fits_normalization="minmax", fits_range=None,
@@ -189,7 +249,8 @@ class NeutronDataset(Dataset):
         fits_normalization / fits_range: ver load_image_as_array (só afetam .fits).
         tiff_normalization / tiff_range: idem, para .tif/.tiff.
         """
-        self.files = list_supported_images(root_dir)
+        # 'arquivos' permite passar um subconjunto já dividido (ver dividir_pilha)
+        self.files = list_supported_images(root_dir) if arquivos is None else list(arquivos)
 
         self.patch_size = patch_size
         self.lr_scale = lr_scale
@@ -346,9 +407,11 @@ class StepEdgeDataset(Dataset):
 def get_dataloader(root_dir, batch_size=8, shuffle=True, num_workers=4,
                    patch_size=256, lr_scale=4, patches_per_image=1,
                    min_nonzero=0.0, cache_images=0, pin_memory=False,
+                   arquivos=None, drop_last=True,
                    fits_normalization="minmax", fits_range=None,
                    tiff_normalization="dtype", tiff_range=None):
     dataset = NeutronDataset(root_dir, patch_size=patch_size, lr_scale=lr_scale,
+                             arquivos=arquivos,
                              patches_per_image=patches_per_image,
                              min_nonzero=min_nonzero,
                              cache_images=cache_images,
@@ -360,7 +423,7 @@ def get_dataloader(root_dir, batch_size=8, shuffle=True, num_workers=4,
     # recriar os processos de leitura a cada época, o que pesa quando a época é
     # curta e há muitos workers.
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,
-                      num_workers=num_workers, drop_last=True,
+                      num_workers=num_workers, drop_last=drop_last,
                       pin_memory=pin_memory,
                       persistent_workers=num_workers > 0)
 
