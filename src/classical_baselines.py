@@ -44,6 +44,9 @@ def parse_args():
     parser.add_argument("--fits-normalization", type=str, default="minmax",
                         choices=["minmax", "range", "none"])
     parser.add_argument("--fits-range", type=float, nargs=2, default=None)
+    parser.add_argument("--tiff-normalization", type=str, default="dtype",
+                        choices=["dtype", "range", "minmax"])
+    parser.add_argument("--tiff-range", type=float, nargs=2, default=None)
     return parser.parse_args()
 
 def to_model_range(img):
@@ -108,7 +111,8 @@ def evaluate(args):
 
     for img_path in files:
         name = os.path.basename(img_path)
-        arr = load_image_as_array(img_path, args.fits_normalization, args.fits_range)
+        arr = load_image_as_array(img_path, args.fits_normalization, args.fits_range,
+                                  args.tiff_normalization, args.tiff_range)
         img = torch.from_numpy(arr).unsqueeze(0).unsqueeze(0)  # (1, 1, H, W), [0, 1]
 
         # Recorte central determinístico, múltiplo do fator de escala

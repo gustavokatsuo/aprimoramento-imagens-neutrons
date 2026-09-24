@@ -29,13 +29,27 @@ def list_supported_images(root_dir):
         for f in glob.glob(os.path.join(root_dir, ext))
     )
 
-def load_image_as_array(img_path, fits_normalization="minmax", fits_range=None):
+def load_image_as_array(img_path, fits_normalization="minmax", fits_range=None,
+                        tiff_normalization="dtype", tiff_range=None):
     """
     Carrega uma imagem científica como numpy float32 2D no intervalo [0, 1].
 
     Formatos e normalizações:
-      - TIFF (uint16): leitura via tifffile, divisão por 65535 (faixa fixa do
-        detector ZEISS de 16 bits).
+      - TIFF (inteiro): leitura via tifffile. A normalização é configurável,
+        porque dividir pelo teto do dtype só é adequado quando a aquisição
+        ocupa a faixa toda — e frequentemente não ocupa. As reconstruções
+        deste projeto chegam a no máximo ~8300 de 65535 (12,7%), de modo que
+        'dtype' as comprime em [0, 0.13] e desperdiça 87% da faixa de saída
+        Tanh do Gerador. Modos:
+          * tiff_normalization="dtype" (padrão): divide por np.iinfo(dtype).max.
+          * tiff_normalization="range": usa tiff_range=(lo, hi) explícito, com
+            clipping. É o modo correto para uma PILHA tomográfica: a mesma
+            faixa em todas as fatias preserva a comparabilidade radiométrica
+            entre elas, que é o que dá sentido físico aos tons de cinza.
+          * tiff_normalization="minmax": (img - min)/(max - min) por imagem.
+            CUIDADO: normaliza cada fatia por si, então o mesmo material recebe
+            valores diferentes em fatias diferentes. Use apenas para inspeção
+            de uma imagem isolada, nunca para treinar sobre uma pilha.
       - FITS (float32): leitura via astropy.io.fits. IMPORTANTE: diferente do
         uint16, dados float de FITS NÃO têm faixa fixa — ela varia por aquisição
         (contagens, transmitância, etc.). Por isso a normalização é configurável:
@@ -69,17 +83,34 @@ def load_image_as_array(img_path, fits_normalization="minmax", fits_range=None):
             while img_array.ndim > 2:           # ex.: (N, H, W, C)
                 img_array = img_array[0]
 
-        # A faixa de normalização vem do dtype, não de uma constante: um TIFF
-        # uint8 dividido por 65535 sairia quase preto (~0.004) silenciosamente.
-        if np.issubdtype(img_array.dtype, np.integer):
-            img_array = img_array.astype(np.float32) / np.iinfo(img_array.dtype).max
-        else:
+        if not np.issubdtype(img_array.dtype, np.integer):
             raise ValueError(
                 f"TIFF com dtype {img_array.dtype} em '{img_path}': só TIFF de "
-                f"inteiros (uint8/uint16) tem faixa fixa conhecida. Para dados "
-                f"em ponto flutuante use FITS, que tem normalização explícita "
+                f"inteiros (uint8/uint16) é suportado. Para dados em ponto "
+                f"flutuante use FITS, que tem normalização explícita "
                 f"(ver --fits-normalization)."
             )
+
+        # O dtype precisa ser lido ANTES da conversão para float32
+        teto_dtype = float(np.iinfo(img_array.dtype).max)
+        img_array = img_array.astype(np.float32)
+
+        if tiff_normalization == "dtype":
+            # A faixa vem do dtype: um TIFF uint8 dividido por 65535 sairia
+            # quase preto (~0.004) silenciosamente.
+            lo, hi = 0.0, teto_dtype
+        elif tiff_normalization == "range":
+            if tiff_range is None:
+                raise ValueError("tiff_normalization='range' exige tiff_range=(lo, hi).")
+            lo, hi = float(tiff_range[0]), float(tiff_range[1])
+        elif tiff_normalization == "minmax":
+            lo, hi = float(img_array.min()), float(img_array.max())
+            if hi <= lo:
+                raise ValueError(f"Imagem TIFF constante, min-max indefinido: {img_path}")
+        else:
+            raise ValueError(f"tiff_normalization desconhecida: {tiff_normalization}")
+
+        img_array = np.clip((img_array - lo) / (hi - lo), 0.0, 1.0).astype(np.float32)
 
     elif ext == ".fits":
         if astropy_fits is None:
@@ -125,8 +156,10 @@ def load_image_as_array(img_path, fits_normalization="minmax", fits_range=None):
 
 class NeutronDataset(Dataset):
     def __init__(self, root_dir, patch_size=256, lr_scale=4,
-                 patches_per_image=1,
-                 fits_normalization="minmax", fits_range=None):
+                 patches_per_image=1, min_nonzero=0.0, max_tentativas=10,
+                 cache_images=0,
+                 fits_normalization="minmax", fits_range=None,
+                 tiff_normalization="dtype", tiff_range=None):
         """
         root_dir: Caminho para a pasta com as radiografias.
         patch_size: Tamanho do recorte perfeito (sem distorção) para treino.
@@ -137,18 +170,54 @@ class NeutronDataset(Dataset):
             patches, ordens de magnitude abaixo do necessário para treinar uma
             GAN. O recorte e o espelhamento são sorteados a cada acesso, então
             índices diferentes da mesma imagem produzem patches diferentes.
+        min_nonzero: fração mínima de pixels não-nulos exigida de um recorte.
+            Reconstruções tomográficas têm um círculo útil inscrito na imagem e
+            zeros nos cantos — medido nestes dados, 24,7% da área e 10,8% dos
+            recortes aleatórios ficam majoritariamente fora. Com 0 (padrão) nada
+            é rejeitado; com 0.5 o recorte é resorteado até passar.
+        max_tentativas: quantas vezes resortear antes de aceitar o último.
+        cache_images: quantas imagens JÁ NORMALIZADAS manter em memória (0 = sem
+            cache, -1 = todas). Sem cache, cada recorte relê e renormaliza a
+            imagem inteira: medido nestes dados, 4,8 ms de leitura (servida pelo
+            cache de página do sistema) e 28,3 ms de normalização dos 4,1 M de
+            pixels, para extrair um patch de 256. Com patches_per_image alto, a
+            normalização repetida é o custo dominante do carregamento.
+            ATENÇÃO: com num_workers > 0 cada processo tem a SUA cópia do cache,
+            então a memória total é cache x num_workers. Como o cache remove o
+            gargalo, poucos workers com cache grande costumam render mais que
+            muitos workers sem cache.
         fits_normalization / fits_range: ver load_image_as_array (só afetam .fits).
+        tiff_normalization / tiff_range: idem, para .tif/.tiff.
         """
         self.files = list_supported_images(root_dir)
 
         self.patch_size = patch_size
         self.lr_scale = lr_scale
         self.patches_per_image = max(1, int(patches_per_image))
+        self.min_nonzero = float(min_nonzero)
+        self.max_tentativas = max(1, int(max_tentativas))
+        self.cache_images = int(cache_images)
+        self._cache = {}
         self.fits_normalization = fits_normalization
         self.fits_range = fits_range
+        self.tiff_normalization = tiff_normalization
+        self.tiff_range = tiff_range
 
         # Normalize transforma [0, 1] em [-1, 1] (domínio do Tanh do Gerador)
         self.normalize = transforms.Normalize(mean=[0.5], std=[0.5])
+
+    def _imagem(self, img_path):
+        """Carrega a imagem normalizada, servindo do cache quando disponível."""
+        if self.cache_images != 0 and img_path in self._cache:
+            return self._cache[img_path]
+
+        img_array = load_image_as_array(
+            img_path, self.fits_normalization, self.fits_range,
+            self.tiff_normalization, self.tiff_range
+        )
+        if self.cache_images < 0 or len(self._cache) < self.cache_images:
+            self._cache[img_path] = img_array
+        return img_array
 
     def __len__(self):
         return len(self.files) * self.patches_per_image
@@ -159,9 +228,7 @@ class NeutronDataset(Dataset):
             # uma imagem antes de passar para a seguinte.
             img_path = self.files[idx % len(self.files)]
 
-            img_array = load_image_as_array(
-                img_path, self.fits_normalization, self.fits_range
-            )
+            img_array = self._imagem(img_path)
 
             # Conversão DIRETA numpy -> tensor (1, H, W), preservando float32.
             # NÃO usar TF.to_pil_image aqui: para arrays float ele converte para
@@ -187,10 +254,18 @@ class NeutronDataset(Dataset):
                 )
 
             # --- 2. Extração de Patch Aleatório ---
-            i, j, h_crop, w_crop = transforms.RandomCrop.get_params(
-                img, output_size=(self.patch_size, self.patch_size)
-            )
-            img_hr = TF.crop(img, i, j, h_crop, w_crop)
+            # Um recorte quase todo nulo não é dado: é a borda do círculo de
+            # reconstrução. Treinar sobre ele ensina o Gerador a reproduzir
+            # vazio. Resorteia até passar no critério, ou aceita o último.
+            for _ in range(self.max_tentativas):
+                i, j, h_crop, w_crop = transforms.RandomCrop.get_params(
+                    img, output_size=(self.patch_size, self.patch_size)
+                )
+                img_hr = TF.crop(img, i, j, h_crop, w_crop)
+                if self.min_nonzero <= 0.0:
+                    break
+                if (img_hr > 0).to(torch.float32).mean().item() >= self.min_nonzero:
+                    break
 
             # --- 3. Data Augmentation Científico ---
             if random.random() > 0.5:
@@ -225,12 +300,15 @@ class StepEdgeDataset(Dataset):
     que a MTF seja comparável ao longo do treino.
     """
     def __init__(self, root_dir="data/step_edges", patch_size=512, lr_scale=4,
-                 fits_normalization="minmax", fits_range=None):
+                 fits_normalization="minmax", fits_range=None,
+                 tiff_normalization="dtype", tiff_range=None):
         self.files = list_supported_images(root_dir)
         self.patch_size = patch_size
         self.lr_scale = lr_scale
         self.fits_normalization = fits_normalization
         self.fits_range = fits_range
+        self.tiff_normalization = tiff_normalization
+        self.tiff_range = tiff_range
         self.normalize = transforms.Normalize(mean=[0.5], std=[0.5])
 
     def __len__(self):
@@ -239,7 +317,8 @@ class StepEdgeDataset(Dataset):
     def __getitem__(self, idx):
         img_path = self.files[idx]
         img_array = load_image_as_array(
-            img_path, self.fits_normalization, self.fits_range
+            img_path, self.fits_normalization, self.fits_range,
+            self.tiff_normalization, self.tiff_range
         )
         img = torch.from_numpy(img_array).unsqueeze(0)
 
@@ -266,11 +345,17 @@ class StepEdgeDataset(Dataset):
 
 def get_dataloader(root_dir, batch_size=8, shuffle=True, num_workers=4,
                    patch_size=256, lr_scale=4, patches_per_image=1,
-                   pin_memory=False, fits_normalization="minmax", fits_range=None):
+                   min_nonzero=0.0, cache_images=0, pin_memory=False,
+                   fits_normalization="minmax", fits_range=None,
+                   tiff_normalization="dtype", tiff_range=None):
     dataset = NeutronDataset(root_dir, patch_size=patch_size, lr_scale=lr_scale,
                              patches_per_image=patches_per_image,
+                             min_nonzero=min_nonzero,
+                             cache_images=cache_images,
                              fits_normalization=fits_normalization,
-                             fits_range=fits_range)
+                             fits_range=fits_range,
+                             tiff_normalization=tiff_normalization,
+                             tiff_range=tiff_range)
     # pin_memory acelera a transferência para a GPU; persistent_workers evita
     # recriar os processos de leitura a cada época, o que pesa quando a época é
     # curta e há muitos workers.
@@ -280,14 +365,17 @@ def get_dataloader(root_dir, batch_size=8, shuffle=True, num_workers=4,
                       persistent_workers=num_workers > 0)
 
 def get_step_edge_loader(root_dir="data/step_edges", patch_size=512, lr_scale=4,
-                         num_workers=0, fits_normalization="minmax", fits_range=None):
+                         num_workers=0, fits_normalization="minmax", fits_range=None,
+                         tiff_normalization="dtype", tiff_range=None):
     """
     Loader de validação dos phantoms de borda. Retorna None se o diretório não
     existir ou estiver vazio (o treino segue normalmente sem a validação MTF).
     """
     dataset = StepEdgeDataset(root_dir, patch_size=patch_size, lr_scale=lr_scale,
                               fits_normalization=fits_normalization,
-                              fits_range=fits_range)
+                              fits_range=fits_range,
+                              tiff_normalization=tiff_normalization,
+                              tiff_range=tiff_range)
     if len(dataset) == 0:
         return None
     return DataLoader(dataset, batch_size=1, shuffle=False, num_workers=num_workers)

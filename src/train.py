@@ -102,6 +102,25 @@ def parse_args():
     parser.add_argument("--fits-range", type=float, nargs=2, default=None,
                         metavar=("LO", "HI"),
                         help="Faixa explícita (lo hi) quando --fits-normalization=range")
+    parser.add_argument("--tiff-normalization", type=str, default="dtype",
+                        choices=["dtype", "range", "minmax"],
+                        help="Normalização para .tif/.tiff. 'dtype' divide pelo teto "
+                             "do tipo (65535 em uint16); 'range' usa --tiff-range e é "
+                             "o modo correto para uma pilha tomográfica; 'minmax' "
+                             "normaliza cada fatia por si e NÃO preserva a "
+                             "comparabilidade entre fatias")
+    parser.add_argument("--tiff-range", type=float, nargs=2, default=None,
+                        metavar=("LO", "HI"),
+                        help="Faixa explícita (lo hi) quando --tiff-normalization=range")
+    parser.add_argument("--cache-images", type=int, default=0,
+                        help="Imagens normalizadas mantidas em memória (0 = sem "
+                             "cache, -1 = todas). Evita renormalizar a imagem "
+                             "inteira a cada recorte. Com --num-workers > 0 a "
+                             "memória é multiplicada pelo número de workers")
+    parser.add_argument("--min-nonzero", type=float, default=0.0,
+                        help="Fração mínima de pixels não-nulos num recorte de treino. "
+                             "Reconstruções tomográficas têm zeros fora do círculo de "
+                             "reconstrução; 0.5 descarta recortes majoritariamente vazios")
     args = parser.parse_args()
 
     # Validações que precisam falhar AQUI, e não no meio do treino:
@@ -117,6 +136,8 @@ def parse_args():
     # .fits, possivelmente minutos depois de o job começar.
     if args.fits_normalization == "range" and args.fits_range is None:
         parser.error("--fits-normalization=range exige --fits-range LO HI.")
+    if args.tiff_normalization == "range" and args.tiff_range is None:
+        parser.error("--tiff-normalization=range exige --tiff-range LO HI.")
 
     # --run-dir agrupa tudo de uma execução num lugar só. É o modo pensado para
     # o cluster: cada job escreve em runs/<id> e nenhum pisa no outro.
@@ -285,14 +306,20 @@ def train(args):
                                 pin_memory=device.type == "cuda",
                                 patch_size=args.patch_size, lr_scale=args.lr_scale,
                                 patches_per_image=args.patches_per_image,
+                                min_nonzero=args.min_nonzero,
+                                cache_images=args.cache_images,
                                 fits_normalization=args.fits_normalization,
-                                fits_range=args.fits_range)
+                                fits_range=args.fits_range,
+                                tiff_normalization=args.tiff_normalization,
+                                tiff_range=args.tiff_range)
 
     # Phantoms de borda (opcional): usados só em validação MTF, nunca na loss
     step_edge_loader = get_step_edge_loader(args.step_edge_dir,
                                             lr_scale=args.lr_scale,
                                             fits_normalization=args.fits_normalization,
-                                            fits_range=args.fits_range)
+                                            fits_range=args.fits_range,
+                                            tiff_normalization=args.tiff_normalization,
+                                            tiff_range=args.tiff_range)
     if step_edge_loader is not None:
         print(f"Validação de bordas ativa: {len(step_edge_loader.dataset)} phantom(s) em '{args.step_edge_dir}'", flush=True)
 

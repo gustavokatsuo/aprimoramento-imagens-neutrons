@@ -23,6 +23,20 @@ O treino segue o protocolo de Ledig et al. (2017) em duas fases: as primeiras é
 ### Integridade radiométrica
 As radiografias são TIFF de 16 bits (65.536 níveis) e o pipeline preserva essa profundidade de ponta a ponta: arquivo → `float32` em [0, 1] → `Normalize(0.5, 0.5)` → [-1, 1], domínio da saída `Tanh` do Gerador. Nenhuma etapa passa por PIL em modo `'L'`, que quantizaria para 8 bits. As métricas desnormalizam de volta para [0, 1] e usam `data_range = 1.0`.
 
+**Faixa de normalização.** Dividir pelo teto do dtype só é adequado quando a aquisição ocupa a faixa toda. Nas reconstruções deste projeto o valor máximo é ~8.300 de 65.535 — **12,7%** —, de modo que o modo `dtype` comprime tudo em [0, 0.13] e desperdiça 87% da faixa de saída do Gerador. Para uma pilha tomográfica o modo correto é:
+
+```bash
+--tiff-normalization range --tiff-range 0 8300
+```
+
+A mesma faixa em todas as fatias preserva a comparabilidade radiométrica entre elas, que é o que dá sentido físico aos tons de cinza — claros para a fase metálica, intermediários para os óxidos, escuros para os poros. O modo `minmax` normaliza cada fatia por si e **destrói** essa comparabilidade: medido nas fatias 2028–2030, as três saem com máximo exatamente 1,0, apagando a diferença real entre elas.
+
+**Área útil.** Reconstruções tomográficas têm um círculo útil inscrito na imagem e zeros nos cantos — nestes dados, 24,7% da área. Sem filtro, 11,3% dos recortes aleatórios de 256 px caem majoritariamente fora do círculo e ensinariam o Gerador a reproduzir vazio. `--min-nonzero 0.5` resorteia o recorte até que ao menos metade tenha conteúdo, levando esse número a zero.
+
+**Cache.** Sem cache, cada recorte relê e renormaliza a imagem inteira para extrair 256×256 pixels dela: 4,8 ms de leitura (servida pelo cache de página do sistema) e 28,3 ms normalizando 4,1 milhões de pixels. Com `--patches-per-image` alto, essa renormalização repetida domina o carregamento. `--cache-images` guarda as imagens já normalizadas e reduz o custo por recorte de **29,3 ms para 1,8 ms — 16×**.
+
+O cache vive em cada processo do DataLoader, então a memória é `cache × num_workers`. Nas 2030 fatias, o cache completo ocupa 31,1 GiB por worker. Como o cache remove o gargalo, poucos workers com cache grande rendem mais que muitos workers sem cache — por exemplo `--num-workers 2 --cache-images 500` cabe em ~15 GiB no total.
+
 ---
 
 ## Métricas
@@ -127,6 +141,9 @@ Argumentos mais usados:
 | `--batch-size` | `8` | batch total (dividido entre GPUs, se houver mais de uma) |
 | `--patch-size` | `256` | tamanho do recorte HR |
 | `--patches-per-image` | `1` | recortes por radiografia em cada época |
+| `--tiff-normalization` | `dtype` | `dtype`, `range` ou `minmax` (ver abaixo) |
+| `--min-nonzero` | `0.0` | fração mínima de pixels não-nulos num recorte |
+| `--cache-images` | `0` | imagens normalizadas mantidas em memória (`-1` = todas) |
 | `--lr` | `1e-4` | taxa de aprendizado |
 | `--seed` | `42` | semente para reprodutibilidade |
 | `--run-dir` | — | agrupa config, logs, pesos e amostras desta execução |
