@@ -95,6 +95,7 @@ aprimoramento-imagens-neutrons/
 ├── notebooks/
 │   └── arquitetura_ic.ipynb    # Protótipo inicial (ver nota abaixo)
 ├── scripts/
+│   ├── inspecionar_dados.py    # Diagnóstico de um conjunto antes de treinar
 │   └── train_coaraci.slurm     # Submissão no cluster Coaraci
 ├── src/                        # Código-fonte modularizado
 │   ├── __init__.py
@@ -139,7 +140,13 @@ Para executar este projeto localmente, é recomendável a utilização de um amb
    Confirme a versão de CUDA com `nvidia-smi` ou com o suporte do cluster
    (`cu121`, `cu124`, `cu126`… variam por instalação).
 
-3. **Colocar os dados** em `data/raw/` (e, opcionalmente, os phantoms de borda em `data/step_edges/`). As imagens precisam ser maiores ou iguais ao `--patch-size` usado no treino.
+3. **Conferir o conjunto** antes do primeiro treino, sobretudo se for novo:
+   ```bash
+   venv/bin/python scripts/inspecionar_dados.py data/raw
+   ```
+   Reporta formato, faixa efetiva de valores, geometria e se há borda para MTF — que é o que determina `--tiff-range` e `--min-nonzero`.
+
+4. **Colocar os dados** em `data/raw/` (e, opcionalmente, os phantoms de borda em `data/step_edges/`). As imagens precisam ser maiores ou iguais ao `--patch-size` usado no treino.
 
 > **Tamanho da época.** Cada radiografia rende `--patches-per-image` recortes aleatórios por época. Com o padrão `1`, um conjunto de 30 imagens dá uma época de 30 amostras — longe do necessário para treinar uma GAN. Para treino real, use dezenas ou centenas; o script avisa quando a época tem menos de 100 amostras.
 
