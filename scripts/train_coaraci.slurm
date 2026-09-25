@@ -2,75 +2,94 @@
 #===============================================================================
 # Treinamento SRGAN no cluster Coaraci (SLURM)
 #
-# Feito para ser submetido SEM editar o arquivo: os valores que variam por
-# instalação vêm da linha de comando ou do ambiente, e as diretivas abaixo são
-# só defaults. Opções passadas ao sbatch têm precedência sobre elas.
+# Os valores de partição, GPUs, módulos e scratch foram tirados de um script
+# que já roda no Coaraci (script_gpu.slurm, do grupo). Qualquer opção passada
+# ao sbatch sobrepõe as diretivas abaixo.
 #
-#   sbatch scripts/train_coaraci.slurm                      # tenta com os defaults
-#   sbatch -p gpu -A meu-projeto scripts/train_coaraci.slurm
-#   sbatch --export=ALL,MODULOS="python/3.11 cuda/12.4" scripts/train_coaraci.slurm
+#   sbatch scripts/train_coaraci.slurm                       # como está
+#   sbatch --gpus 1 --time 8:00:00 scripts/train_coaraci.slurm
+#   sbatch --export=ALL,RESUME=runs/<job>/weights/checkpoint_last.pth \
+#          scripts/train_coaraci.slurm                       # retomar
 #
-# Se a primeira submissão for recusada, o próprio SLURM diz o que falta
-# ("Invalid partition", "Invalid account"); descubra os nomes com:
+# Antes da primeira submissão:
+#   1. criar o venv no cluster:  python -m venv venv
+#                                venv/bin/python -m pip install -r requirements.txt
+#   2. colocar as fatias em data/raw/ (ver nota sobre o .zip mais abaixo)
 #
-#   sinfo -o "%P %G %l"                              partições, GPUs e walltime
-#   sacctmgr show assoc user=$USER format=account    contas de alocação
-#   module avail                                     módulos disponíveis
-#   echo "$SCRATCH"                                  raiz do scratch, se definida
-#
-# Fila:      squeue -u $USER
-# Retomada:  sbatch --export=ALL,RESUME=runs/<job>/weights/checkpoint_last.pth \
-#                   scripts/train_coaraci.slurm
+# Fila:  squeue -u $USER      Cancelar:  scancel <job>
 #===============================================================================
 
 #SBATCH --job-name=srgan-neutrons
+#SBATCH --partition=gpu-x
 #SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
-#SBATCH --gres=gpu:1
+#SBATCH --ntasks-per-node=32
+#SBATCH --gpus=2
 #SBATCH --time=24:00:00
 #SBATCH --output=out_%j.txt
 #SBATCH --error=err_%j.txt
 #
-# Partição e conta ficam DE FORA de propósito: seus nomes variam por cluster e
-# um valor errado faz o sbatch recusar o job na hora. Sem a diretiva, o SLURM
-# usa a partição padrão do site e dispensa a conta quando ela não é exigida.
-# Passe-as no sbatch quando for necessário:  sbatch -p <fila> -A <conta> ...
+# O Coaraci não exige --account: o script de referência do grupo não traz a
+# diretiva. Se alguma fila passar a exigir, o sbatch recusa dizendo o que falta.
+# Limite de cores: 32 por nó ao usar duas GPUs.
+# Para receber aviso por e-mail, acrescente na submissão:
+#   sbatch --mail-user=SEU_EMAIL --mail-type=END,FAIL scripts/train_coaraci.slurm
 
 set -euo pipefail
 
-# Módulos a carregar. Vazio = nenhum, o que basta quando o venv já traz tudo.
-MODULOS="${MODULOS:-}"
+# Módulos do Coaraci, na ordem usada pelo script de referência do grupo.
+MODULOS="${MODULOS:-gnu12 hwloc cuda python/3.11.7-gcc-12.2.0-jm3y27n}"
 
-# Raiz do scratch, na ordem de preferência: o que foi passado no ambiente, as
-# variáveis que os sites costumam definir, e por último o diretório do projeto
-# (funciona, mas lê do filesystem compartilhado durante todo o treino).
-SCRATCH_RAIZ="${SCRATCH_RAIZ:-${SCRATCH:-${SLURM_TMPDIR:-${TMPDIR:-${SLURM_SUBMIT_DIR}/scratch-local}}}}"
+# Scratch local do nó. A convenção do Coaraci é /scratch/local/$USER/$SLURM_JOB_ID.
+SCRATCH_RAIZ="${SCRATCH_RAIZ:-/scratch/local/${USER}}"
 
 PROJETO="${SLURM_SUBMIT_DIR}"
 TRABALHO="${SCRATCH_RAIZ}/srgan-${SLURM_JOB_ID}"
 
-echo "[$(hostname)] job ${SLURM_JOB_ID} | projeto ${PROJETO} | scratch ${TRABALHO}"
-echo "GPUs visíveis: ${CUDA_VISIBLE_DEVICES:-nenhuma} | CPUs: ${SLURM_CPUS_PER_TASK}"
+# Com --ntasks-per-node (em vez de --cpus-per-task) o SLURM não define
+# SLURM_CPUS_PER_TASK. Os workers do DataLoader são dimensionados pelo que
+# estiver disponível, com teto de 8: acima disso o ganho é pequeno e cada
+# worker carrega sua própria cópia do cache de imagens.
+CORES="${SLURM_CPUS_PER_TASK:-${SLURM_NTASKS_PER_NODE:-8}}"
+WORKERS=$(( CORES < 8 ? CORES : 8 ))
+
+echo "[$(hostname)] job ${SLURM_JOB_ID}"
+echo "  projeto : ${PROJETO}"
+echo "  scratch : ${TRABALHO}"
+echo "  GPUs    : ${CUDA_VISIBLE_DEVICES:-nenhuma} | cores ${CORES} | workers ${WORKERS}"
 
 # --- Ambiente ---------------------------------------------------------------
-if [[ -n "${MODULOS}" ]]; then
-    module purge
-    module load ${MODULOS}
-fi
+module purge
+module load ${MODULOS}
 source "${PROJETO}/venv/bin/activate"
 
 # Explícito, em vez de contar com o SLURM iniciar no diretório de submissão:
 # 'python -m src.train' precisa da raiz do projeto no caminho de import.
 cd "${PROJETO}"
 
-# --- Dados no scratch -------------------------------------------------------
-# Ler as radiografias direto do home castiga o filesystem compartilhado durante
-# todo o treino. Copia-se uma vez para o scratch e lê-se de lá.
+# --- Dados para o scratch do nó ---------------------------------------------
+# Ler as fatias do filesystem compartilhado durante horas de treino o castiga,
+# e são milhares de arquivos pequenos. Duas formas, em ordem de preferência:
+#
+#   1. data/raw.zip + sbcast  — um arquivo só viaja pela rede, descompactado
+#      localmente. É o caminho usado pelo grupo. Criar com:
+#          cd data && zip -r -0 raw.zip raw/     (-0: sem compressão, TIFF já é)
+#   2. cp -r                  — funciona, mas copia arquivo a arquivo.
 mkdir -p "${TRABALHO}/data"
-cp -r "${PROJETO}/data/raw" "${TRABALHO}/data/"
+
+if [[ -f "${PROJETO}/data/raw.zip" ]] && command -v sbcast >/dev/null 2>&1; then
+    echo "Enviando data/raw.zip para o scratch via sbcast..."
+    sbcast -f "${PROJETO}/data/raw.zip" "${TRABALHO}/raw.zip"
+    unzip -q "${TRABALHO}/raw.zip" -d "${TRABALHO}/data/"
+    rm -f "${TRABALHO}/raw.zip"
+else
+    echo "Copiando data/raw para o scratch (sem raw.zip; ver nota no script)..."
+    cp -r "${PROJETO}/data/raw" "${TRABALHO}/data/"
+fi
+
 cp -r "${PROJETO}/data/step_edges" "${TRABALHO}/data/" 2>/dev/null || \
     echo "AVISO: sem data/step_edges — o treino roda, mas sem a validação de MTF"
+
+echo "Fatias no scratch: $(ls -1 "${TRABALHO}/data/raw" | wc -l)"
 
 # O checkpoint de retomada também precisa estar no scratch
 ARG_RESUME=""
@@ -90,6 +109,7 @@ recuperar_resultados() {
     mkdir -p "${PROJETO}/runs"
     if cp -r "${TRABALHO}/run" "${PROJETO}/runs/${SLURM_JOB_ID}"; then
         echo "Resultados em ${PROJETO}/runs/${SLURM_JOB_ID}"
+        rm -rf "${TRABALHO}"
     else
         echo "ERRO: falha ao copiar os resultados; eles seguem em ${TRABALHO}/run"
     fi
@@ -103,6 +123,9 @@ trap recuperar_resultados EXIT
 # batch TOTAL, dividido entre elas.
 # python -u complementa o flush=True dos prints: nada fica preso no buffer e o
 # out_%j.txt acompanha o treino em tempo real.
+#
+# Os valores de --tiff-range, --split-gap e --min-nonzero vêm da caracterização
+# em docs/dataset.md; leia-a antes de alterá-los.
 python -u -m src.train \
     --data-dir      "${TRABALHO}/data/raw" \
     --step-edge-dir "${TRABALHO}/data/step_edges" \
@@ -114,13 +137,14 @@ python -u -m src.train \
     --lr-decay-epochs 50 80 \
     --patch-size 256 \
     --patches-per-image 100 \
+    --tiff-normalization range --tiff-range 0 8300 \
+    --min-nonzero 0.5 \
     --val-fraction 0.10 \
     --test-fraction 0.10 \
     --split-gap 30 \
-    --min-nonzero 0.5 \
     --cache-images 500 \
     --amp \
-    --num-workers "${SLURM_CPUS_PER_TASK}" \
+    --num-workers "${WORKERS}" \
     --seed 42 \
     ${ARG_RESUME}
 

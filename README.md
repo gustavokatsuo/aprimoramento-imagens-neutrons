@@ -222,17 +222,22 @@ Para retomar um treino interrompido:
 sbatch --export=ALL,RESUME=runs/<job>/weights/checkpoint_last.pth scripts/train_coaraci.slurm
 ```
 
-O script foi feito para submeter **sem editar o arquivo**: o que varia por instalação vem da linha de comando ou do ambiente, e as diretivas `#SBATCH` são apenas defaults, que qualquer opção passada ao `sbatch` sobrepõe.
+O script está preenchido com os valores do Coaraci — partição `gpu-x`, 2 GPUs, módulos `gnu12 hwloc cuda python/3.11.7-gcc-12.2.0-jm3y27n`, scratch em `/scratch/local/$USER` — e submete sem edição. Qualquer opção passada ao `sbatch` sobrepõe as diretivas:
 
 ```bash
-sbatch scripts/train_coaraci.slurm                            # tenta com os defaults
-sbatch -p gpu -A meu-projeto scripts/train_coaraci.slurm      # partição e conta
-sbatch --export=ALL,MODULOS="python/3.11 cuda/12.4" scripts/train_coaraci.slurm
+sbatch --gpus 1 --time 8:00:00 scripts/train_coaraci.slurm
+sbatch --mail-user=SEU_EMAIL --mail-type=END,FAIL scripts/train_coaraci.slurm
 ```
 
-Partição e conta ficam fora do arquivo de propósito: seus nomes variam por cluster e um valor errado faz o `sbatch` recusar o job de imediato. Sem a diretiva, o SLURM usa a partição padrão do site e dispensa a conta quando ela não é exigida. A raiz do scratch é descoberta na ordem `$SCRATCH_RAIZ`, `$SCRATCH`, `$SLURM_TMPDIR`, `$TMPDIR` e, em último caso, uma pasta dentro do projeto.
+**Antes da primeira submissão**, crie o venv no cluster e coloque as fatias em `data/raw/`.
 
-Se a primeira submissão for recusada, o próprio SLURM diz o que falta (`Invalid partition`, `Invalid account`); os nomes corretos saem de `sinfo -o "%P %G %l"` e `sacctmgr show assoc user=$USER format=account`.
+**Dados para o nó.** São milhares de arquivos pequenos, e copiá-los um a um pelo filesystem compartilhado é lento. Se existir `data/raw.zip`, o script o envia com `sbcast` — um arquivo só viaja pela rede — e descompacta localmente:
+
+```bash
+cd data && zip -r -0 raw.zip raw/     # -0: sem compressão, TIFF já é comprimido
+```
+
+Sem o zip, o script cai para `cp -r`, que também funciona. Os resultados voltam do scratch para `runs/$SLURM_JOB_ID` mesmo se o job for interrompido por walltime, e o scratch é limpo depois.
 
 ### Experimento: profundidade da VGG e peso do termo adversarial
 
