@@ -76,7 +76,7 @@ A cada validação são medidas três frequências de corte (MTF10) sobre o mesm
 
 A bicúbica é a linha de base que torna o número interpretável: é o que se obtém sem nenhum aprendizado. MTF10 da SR **acima** da bicúbica é evidência de recuperação real de frequência espacial.
 
-O detalhamento de cada métrica, suas limitações e o protocolo de comparação estão em [`docs/resolution_metrics.md`](docs/resolution_metrics.md).
+O detalhamento de cada métrica, suas limitações e o protocolo de comparação estão em [`docs/resolution_metrics.md`](docs/resolution_metrics.md). A caracterização do conjunto de dados — escala física, faixa dinâmica, geometria da reconstrução, correlação entre fatias e as decisões de pipeline que decorrem de cada uma — está em [`docs/dataset.md`](docs/dataset.md).
 
 ---
 
@@ -90,6 +90,7 @@ aprimoramento-imagens-neutrons/
 │   └── step_edges/             # Phantoms de borda para a validação de MTF
 ├── docs/
 │   ├── plano_ic_gustavo.pdf
+│   ├── dataset.md              # Caracterização dos dados e decisões que decorrem
 │   └── resolution_metrics.md   # Métricas de resolução: definição e limitações
 ├── notebooks/
 │   └── arquitetura_ic.ipynb    # Protótipo inicial (ver nota abaixo)
