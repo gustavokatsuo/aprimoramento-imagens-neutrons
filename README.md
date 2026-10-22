@@ -217,6 +217,8 @@ Por padrão avalia **só o bloco de teste**, reconstruído com a mesma divisão 
 
 **Configuração herdada.** Normalização (`--tiff-*`, `--fits-*`), divisão (`--val-fraction`, `--test-fraction`, `--split-gap`) e `--lr-scale` são lidos do `logs/config.json` da execução, encontrado a partir de `--gen-weights`. Não é preciso repeti-los; passá-los com valor diferente do treino é erro. Isso importa porque a normalização errada não falha: a SRGAN recebe uma entrada que nunca viu e o PSNR de todos os métodos muda de escala (medido: bicúbica de 34,3 para 52,3 dB, SRGAN de 15,1 para 8,4 dB), e a tabela inverte a conclusão sem aviso. Para avaliar só os clássicos nas condições de uma execução, use `--config runs/<job>/logs/config.json`.
 
+**Resolução (MTF).** Se houver phantoms em `--step-edge-dir` (padrão `data/step_edges`), o script mede também a MTF10 de cada método e da referência HR, com o mesmo recorte e a mesma degradação da validação do treino, e grava `<output>_mtf.csv`. Cada linha traz o PSNR no phantom ao lado da MTF10. Um método com MTF10 acima da bicúbica mas PSNR abaixo dela é marcado como suspeito, porque ruído ou artefato também sustentam a curva. Sem phantoms, a etapa é pulada com aviso.
+
 Avalia bicúbico, Lanczos, bicúbico+unsharp e a SRGAN no **mesmo** pipeline degradação → reconstrução → métrica, com as mesmas funções de PSNR/SSIM do treino. O unsharp masking entra de propósito: realça contraste sem recuperar frequência espacial, servindo de controle para distinguir ganho real de mero realce visual.
 
 ### Treino no cluster (Coaraci)
