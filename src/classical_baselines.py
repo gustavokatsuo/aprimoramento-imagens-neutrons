@@ -9,15 +9,21 @@ Roda o MESMO pipeline degradação -> reconstrução -> métrica do treino da GA
   - Métricas: as MESMAS funções calculate_psnr/calculate_ssim de src/utils.py
     usadas no treino (que esperam o domínio [-1, 1] do modelo), garantindo
     comparação justa entre métodos clássicos e a GAN.
+  - Conjunto: por padrão, SÓ o bloco de teste, reconstruído com a mesma
+    dividir_pilha do treino. Avaliar a pasta inteira misturaria fatias que o
+    Gerador viu no treino, e a linha 'srgan' da tabela deixaria de medir
+    generalização. --val-fraction, --test-fraction e --split-gap precisam ser
+    os MESMOS do treino (estão em logs/config.json da execução).
 
 Uso:
-    python -m src.classical_baselines --data-dir data/raw
-    python -m src.classical_baselines --data-dir data/raw --gen-weights weights/gen_epoch_99.pth
+    python -m src.classical_baselines --data-dir data/raw \\
+        --val-fraction 0.10 --test-fraction 0.10 --split-gap 30 \\
+        --tiff-normalization range --tiff-range 0 8300 \\
+        --gen-weights runs/<job>/weights/gen_epoch_99.pth
 """
 
 import argparse
 import csv
-import glob
 import os
 
 import numpy as np
@@ -26,7 +32,8 @@ import torchvision.transforms as transforms
 import torchvision.transforms.functional as TF
 from PIL import Image
 
-from src.data_loader import load_image_as_array, SUPPORTED_EXTENSIONS
+from src.data_loader import (load_image_as_array, list_supported_images,
+                             dividir_pilha)
 from src.model import Generator
 from src.utils import calculate_psnr, calculate_ssim
 
@@ -47,6 +54,17 @@ def parse_args():
     parser.add_argument("--tiff-normalization", type=str, default="dtype",
                         choices=["dtype", "range", "minmax"])
     parser.add_argument("--tiff-range", type=float, nargs=2, default=None)
+    parser.add_argument("--split", type=str, default="test",
+                        choices=["test", "val", "train", "all"],
+                        help="Conjunto avaliado. 'test' (padrão) é o único que vale "
+                             "para o relatório; 'all' avalia a pasta inteira, "
+                             "incluindo fatias de treino")
+    parser.add_argument("--val-fraction", type=float, default=0.0,
+                        help="Igual ao do treino (ver logs/config.json)")
+    parser.add_argument("--test-fraction", type=float, default=0.0,
+                        help="Igual ao do treino (ver logs/config.json)")
+    parser.add_argument("--split-gap", type=int, default=0,
+                        help="Igual ao do treino (ver logs/config.json)")
     return parser.parse_args()
 
 def to_model_range(img):
@@ -90,13 +108,29 @@ def unsharp_mask(img, amount=1.0, kernel_size=5):
 def evaluate(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    files = sorted(
-        f for ext in SUPPORTED_EXTENSIONS
-        for f in glob.glob(os.path.join(args.data_dir, ext))
-    )
-    if not files:
+    # Ordem natural e a mesma divisão do treino: o bloco de teste aqui é
+    # exatamente o bloco que o treino deixou intocado.
+    todos = list_supported_images(args.data_dir)
+    if not todos:
         print(f"AVISO: Nenhuma imagem encontrada em '{args.data_dir}'.", flush=True)
         return
+
+    if args.split == "all":
+        files = todos
+        print("AVISO: --split all inclui fatias de treino; os números não medem "
+              "generalização e não servem para o relatório.", flush=True)
+    else:
+        treino, validacao, teste = dividir_pilha(
+            todos, args.val_fraction, args.test_fraction, args.split_gap)
+        files = {"train": treino, "val": validacao, "test": teste}[args.split]
+        if not files:
+            raise SystemExit(
+                f"ERRO: o conjunto '{args.split}' ficou vazio. Passe os mesmos "
+                f"--val-fraction, --test-fraction e --split-gap do treino "
+                f"(estão em logs/config.json da execução).")
+
+    print(f"Conjunto '{args.split}': {len(files)} imagem(ns), de "
+          f"{os.path.basename(files[0])} a {os.path.basename(files[-1])}", flush=True)
 
     # Carrega o Gerador da SRGAN, se solicitado
     generator = None

@@ -210,8 +210,12 @@ O `config.json` registra os argumentos, o commit do código e o ambiente, de mod
 
 ```bash
 python -m src.classical_baselines --data-dir data/raw \
+    --val-fraction 0.10 --test-fraction 0.10 --split-gap 30 \
+    --tiff-normalization range --tiff-range 0 8300 \
     --gen-weights runs/experimento-1/weights/gen_epoch_99.pth
 ```
+
+Por padrão avalia **só o bloco de teste**, reconstruído com a mesma divisão contígua do treino — por isso `--val-fraction`, `--test-fraction` e `--split-gap` precisam ser os da execução avaliada (estão no `config.json`). Avaliar a pasta inteira incluiria fatias que o Gerador viu no treino; `--split all` faz isso, com aviso, para inspeção apenas. A normalização também precisa ser a do treino.
 
 Avalia bicúbico, Lanczos, bicúbico+unsharp e a SRGAN no **mesmo** pipeline degradação → reconstrução → métrica, com as mesmas funções de PSNR/SSIM do treino. O unsharp masking entra de propósito: realça contraste sem recuperar frequência espacial, servindo de controle para distinguir ganho real de mero realce visual.
 
