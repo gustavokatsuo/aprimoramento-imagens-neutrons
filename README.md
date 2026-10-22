@@ -210,12 +210,12 @@ O `config.json` registra os argumentos, o commit do código e o ambiente, de mod
 
 ```bash
 python -m src.classical_baselines --data-dir data/raw \
-    --val-fraction 0.10 --test-fraction 0.10 --split-gap 30 \
-    --tiff-normalization range --tiff-range 0 8300 \
     --gen-weights runs/experimento-1/weights/gen_epoch_99.pth
 ```
 
-Por padrão avalia **só o bloco de teste**, reconstruído com a mesma divisão contígua do treino — por isso `--val-fraction`, `--test-fraction` e `--split-gap` precisam ser os da execução avaliada (estão no `config.json`). Avaliar a pasta inteira incluiria fatias que o Gerador viu no treino; `--split all` faz isso, com aviso, para inspeção apenas. A normalização também precisa ser a do treino.
+Por padrão avalia **só o bloco de teste**, reconstruído com a mesma divisão contígua do treino. Avaliar a pasta inteira incluiria fatias que o Gerador viu no treino; `--split all` faz isso, com aviso, para inspeção apenas.
+
+**Configuração herdada.** Normalização (`--tiff-*`, `--fits-*`), divisão (`--val-fraction`, `--test-fraction`, `--split-gap`) e `--lr-scale` são lidos do `logs/config.json` da execução, encontrado a partir de `--gen-weights`. Não é preciso repeti-los; passá-los com valor diferente do treino é erro. Isso importa porque a normalização errada não falha: a SRGAN recebe uma entrada que nunca viu e o PSNR de todos os métodos muda de escala (medido: bicúbica de 34,3 para 52,3 dB, SRGAN de 15,1 para 8,4 dB), e a tabela inverte a conclusão sem aviso. Para avaliar só os clássicos nas condições de uma execução, use `--config runs/<job>/logs/config.json`.
 
 Avalia bicúbico, Lanczos, bicúbico+unsharp e a SRGAN no **mesmo** pipeline degradação → reconstrução → métrica, com as mesmas funções de PSNR/SSIM do treino. O unsharp masking entra de propósito: realça contraste sem recuperar frequência espacial, servindo de controle para distinguir ganho real de mero realce visual.
 

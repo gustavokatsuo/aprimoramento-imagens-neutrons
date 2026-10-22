@@ -12,18 +12,26 @@ Roda o MESMO pipeline degradação -> reconstrução -> métrica do treino da GA
   - Conjunto: por padrão, SÓ o bloco de teste, reconstruído com a mesma
     dividir_pilha do treino. Avaliar a pasta inteira misturaria fatias que o
     Gerador viu no treino, e a linha 'srgan' da tabela deixaria de medir
-    generalização. --val-fraction, --test-fraction e --split-gap precisam ser
-    os MESMOS do treino (estão em logs/config.json da execução).
+    generalização.
+  - Configuração herdada: normalização, divisão e fator de escala vêm do
+    logs/config.json da execução que gerou os pesos (ver CHAVES_HERDADAS).
+    Avaliar com outra normalização não dá erro nenhum: a SRGAN recebe uma
+    entrada que nunca viu e o PSNR de todos os métodos muda de escala, e a
+    tabela sai com cara de válida e conclusão invertida.
 
 Uso:
+    # com pesos: config.json encontrado ao lado deles, nada a repetir
     python -m src.classical_baselines --data-dir data/raw \\
-        --val-fraction 0.10 --test-fraction 0.10 --split-gap 30 \\
-        --tiff-normalization range --tiff-range 0 8300 \\
         --gen-weights runs/<job>/weights/gen_epoch_99.pth
+
+    # só os clássicos, com a configuração de uma execução
+    python -m src.classical_baselines --data-dir data/raw \\
+        --config runs/<job>/logs/config.json
 """
 
 import argparse
 import csv
+import json
 import os
 
 import numpy as np
@@ -37,35 +45,133 @@ from src.data_loader import (load_image_as_array, list_supported_images,
 from src.model import Generator
 from src.utils import calculate_psnr, calculate_ssim
 
+# Argumentos que precisam ser idênticos aos do treino, com o valor usado
+# quando não há config.json (os mesmos padrões de src/train.py). data_dir
+# fica de fora de propósito: no cluster ele aponta para o scratch do nó.
+CHAVES_HERDADAS = {
+    "lr_scale": 4,
+    "fits_normalization": "minmax",
+    "fits_range": None,
+    "tiff_normalization": "dtype",
+    "tiff_range": None,
+    "val_fraction": 0.0,
+    "test_fraction": 0.0,
+    "split_gap": 0,
+}
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Baselines clássicos vs SRGAN")
     parser.add_argument("--data-dir", type=str, default="data/raw")
-    parser.add_argument("--lr-scale", type=int, default=4)
     parser.add_argument("--patch-size", type=int, default=512,
                         help="Recorte central para avaliação (0 = imagem inteira)")
     parser.add_argument("--gen-weights", type=str, default=None,
-                        help="Pesos do Gerador (ex.: weights/gen_epoch_99.pth) para incluir a SRGAN na tabela")
+                        help="Pesos do Gerador (ex.: runs/<job>/weights/gen_epoch_99.pth) "
+                             "para incluir a SRGAN na tabela")
+    parser.add_argument("--config", type=str, default=None,
+                        help="config.json da execução de treino. Omitido, é procurado "
+                             "em <execução>/logs/config.json a partir de --gen-weights")
+    parser.add_argument("--sem-config", action="store_true",
+                        help="Avalia os pesos sem config.json, só com os argumentos "
+                             "passados. Use apenas para execuções antigas que não o gravaram")
     parser.add_argument("--unsharp-amount", type=float, default=1.0,
                         help="Intensidade do unsharp masking")
     parser.add_argument("--output", type=str, default="results/classical_baselines.csv")
-    parser.add_argument("--fits-normalization", type=str, default="minmax",
-                        choices=["minmax", "range", "none"])
-    parser.add_argument("--fits-range", type=float, nargs=2, default=None)
-    parser.add_argument("--tiff-normalization", type=str, default="dtype",
-                        choices=["dtype", "range", "minmax"])
-    parser.add_argument("--tiff-range", type=float, nargs=2, default=None)
     parser.add_argument("--split", type=str, default="test",
                         choices=["test", "val", "train", "all"],
                         help="Conjunto avaliado. 'test' (padrão) é o único que vale "
                              "para o relatório; 'all' avalia a pasta inteira, "
                              "incluindo fatias de treino")
-    parser.add_argument("--val-fraction", type=float, default=0.0,
-                        help="Igual ao do treino (ver logs/config.json)")
-    parser.add_argument("--test-fraction", type=float, default=0.0,
-                        help="Igual ao do treino (ver logs/config.json)")
-    parser.add_argument("--split-gap", type=int, default=0,
-                        help="Igual ao do treino (ver logs/config.json)")
+
+    # Os argumentos abaixo vêm do config.json quando há um. Passá-los só é
+    # necessário sem config; passá-los com valor diferente do config é erro.
+    # O default None distingue "não passado" de "passado com o valor padrão".
+    herdados = parser.add_argument_group(
+        "herdados do treino", "Lidos do config.json; informe só sem config")
+    herdados.add_argument("--lr-scale", type=int, default=None)
+    herdados.add_argument("--fits-normalization", type=str, default=None,
+                          choices=["minmax", "range", "none"])
+    herdados.add_argument("--fits-range", type=float, nargs=2, default=None)
+    herdados.add_argument("--tiff-normalization", type=str, default=None,
+                          choices=["dtype", "range", "minmax"])
+    herdados.add_argument("--tiff-range", type=float, nargs=2, default=None)
+    herdados.add_argument("--val-fraction", type=float, default=None)
+    herdados.add_argument("--test-fraction", type=float, default=None)
+    herdados.add_argument("--split-gap", type=int, default=None)
     return parser.parse_args()
+
+def _localizar_config(args):
+    """
+    Caminho do config.json a usar, ou None. Com --run-dir o treino grava
+    <execução>/weights/gen_epoch_N.pth e <execução>/logs/config.json; sem ele,
+    weights/ e logs/ relativos ao diretório de trabalho — a mesma conta
+    (dois níveis acima dos pesos, depois logs/) cobre os dois casos.
+    """
+    if args.config:
+        if not os.path.isfile(args.config):
+            raise SystemExit(f"ERRO: --config '{args.config}' não existe.")
+        return args.config
+    if args.gen_weights:
+        execucao = os.path.dirname(os.path.dirname(os.path.abspath(args.gen_weights)))
+        candidato = os.path.join(execucao, "logs", "config.json")
+        if os.path.isfile(candidato):
+            return candidato
+        if not args.sem_config:
+            raise SystemExit(
+                f"ERRO: não achei o config.json da execução dos pesos (procurei "
+                f"'{candidato}'). Sem ele não há como garantir que a avaliação use "
+                f"a normalização e a divisão do treino. Passe --config <caminho> "
+                f"ou, para uma execução antiga sem config, --sem-config com os "
+                f"argumentos do treino.")
+    return None
+
+def _mesmo_valor(a, b):
+    """Compara valores do CLI e do JSON (listas e int/float misturados)."""
+    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+        return len(a) == len(b) and all(_mesmo_valor(x, y) for x, y in zip(a, b))
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return float(a) == float(b)
+    return a == b
+
+def resolver_configuracao(args):
+    """
+    Preenche em 'args' os argumentos de CHAVES_HERDADAS a partir do config.json
+    da execução. Um argumento passado na linha de comando com valor DIFERENTE
+    do config é erro: significaria avaliar o modelo em condições distintas das
+    do treino. Sem config, valem os argumentos passados ou os padrões.
+    """
+    caminho = _localizar_config(args)
+    gravados = {}
+    if caminho:
+        with open(caminho) as f:
+            gravados = json.load(f).get("argumentos", {})
+        print(f"Configuração do treino lida de {caminho}", flush=True)
+
+    conflitos = []
+    for chave, padrao in CHAVES_HERDADAS.items():
+        passado = getattr(args, chave)
+        if chave in gravados:
+            if passado is not None and not _mesmo_valor(passado, gravados[chave]):
+                conflitos.append(f"--{chave.replace('_', '-')}: passado {passado}, "
+                                 f"treino usou {gravados[chave]}")
+            setattr(args, chave, gravados[chave])
+        elif passado is None:
+            setattr(args, chave, padrao)
+
+    if conflitos:
+        raise SystemExit("ERRO: argumentos diferentes dos do treino:\n  "
+                         + "\n  ".join(conflitos)
+                         + "\nRemova-os para usar os do config.json.")
+    if args.lr_scale != 4:
+        raise SystemExit(f"ERRO: --lr-scale={args.lr_scale} não é suportado: o "
+                         f"Gerador reconstrói 4x (ver src/model.py).")
+    if args.tiff_normalization == "range" and args.tiff_range is None:
+        raise SystemExit("ERRO: tiff_normalization='range' exige tiff_range.")
+    if args.fits_normalization == "range" and args.fits_range is None:
+        raise SystemExit("ERRO: fits_normalization='range' exige fits_range.")
+
+    print("  " + " | ".join(f"{k}={getattr(args, k)}" for k in CHAVES_HERDADAS),
+          flush=True)
+    return args
 
 def to_model_range(img):
     """[0, 1] -> [-1, 1], o domínio esperado pelas métricas de utils.py."""
@@ -125,9 +231,10 @@ def evaluate(args):
         files = {"train": treino, "val": validacao, "test": teste}[args.split]
         if not files:
             raise SystemExit(
-                f"ERRO: o conjunto '{args.split}' ficou vazio. Passe os mesmos "
-                f"--val-fraction, --test-fraction e --split-gap do treino "
-                f"(estão em logs/config.json da execução).")
+                f"ERRO: o conjunto '{args.split}' ficou vazio com val_fraction="
+                f"{args.val_fraction}, test_fraction={args.test_fraction} e "
+                f"split_gap={args.split_gap}. Indique a execução de treino com "
+                f"--gen-weights ou --config, ou passe esses argumentos.")
 
     print(f"Conjunto '{args.split}': {len(files)} imagem(ns), de "
           f"{os.path.basename(files[0])} a {os.path.basename(files[-1])}", flush=True)
@@ -201,4 +308,4 @@ def evaluate(args):
     print(f"\nResultados por imagem salvos em {args.output}", flush=True)
 
 if __name__ == "__main__":
-    evaluate(parse_args())
+    evaluate(resolver_configuracao(parse_args()))
