@@ -2,21 +2,22 @@
 #===============================================================================
 # Treinamento SRGAN no cluster Coaraci (SLURM)
 #
-# Os valores de partição, GPUs, módulos e scratch foram tirados de um script
-# que já roda no Coaraci (script_gpu.slurm, do grupo). Qualquer opção passada
-# ao sbatch sobrepõe as diretivas abaixo.
+# Antes da primeira submissão (no nó de login, a partir da raiz do repo):
+#   1. module load gnu12 hwloc cuda python/3.11.7-gcc-12.2.0-jm3y27n
+#      python -m venv venv && venv/bin/python -m pip install -r requirements.txt
+#   2. baixar os pesos da VGG19 (os nós de computação podem não ter internet):
+#      venv/bin/python -c 'from torchvision.models import vgg19, VGG19_Weights; vgg19(weights=VGG19_Weights.DEFAULT)'
+#   3. colocar as fatias em data/raw/ (de preferência também data/raw.zip)
 #
-#   sbatch scripts/train_coaraci.slurm                       # como está
-#   sbatch --gpus 1 --time 8:00:00 scripts/train_coaraci.slurm
-#   sbatch --export=ALL,RESUME=runs/<job>/weights/checkpoint_last.pth \
-#          scripts/train_coaraci.slurm                       # retomar
+#   mkdir -p logs                                  # uma vez: o SLURM não cria
+#   sbatch scripts/train_coaraci.slurm
+#   sbatch --export=ALL,RESUME=runs/<job>/weights/checkpoint_last.pth scripts/train_coaraci.slurm
+#   sbatch --export=ALL,WORKERS=2,CACHE=500 scripts/train_coaraci.slurm
 #
-# Antes da primeira submissão:
-#   1. criar o venv no cluster:  python -m venv venv
-#                                venv/bin/python -m pip install -r requirements.txt
-#   2. colocar as fatias em data/raw/ (ver nota sobre o .zip mais abaixo)
-#
-# Fila:  squeue -u $USER      Cancelar:  scancel <job>
+# Encadear jobs (treino maior que o walltime):
+#   J1=$(sbatch --parsable scripts/train_coaraci.slurm)
+#   J2=$(sbatch --parsable --dependency=afterany:$J1 \
+#        --export=ALL,RESUME=runs/$J1/weights/checkpoint_last.pth scripts/train_coaraci.slurm)
 #===============================================================================
 
 #SBATCH --job-name=srgan-neutrons
@@ -25,85 +26,61 @@
 #SBATCH --ntasks-per-node=32
 #SBATCH --gpus=2
 #SBATCH --time=24:00:00
-#SBATCH --output=out_%j.txt
-#SBATCH --error=err_%j.txt
-#
-# O Coaraci não exige --account: o script de referência do grupo não traz a
-# diretiva. Se alguma fila passar a exigir, o sbatch recusa dizendo o que falta.
-# Limite de cores: 32 por nó ao usar duas GPUs.
-# Para receber aviso por e-mail, acrescente na submissão:
-#   sbatch --mail-user=SEU_EMAIL --mail-type=END,FAIL scripts/train_coaraci.slurm
+#SBATCH --signal=B:USR1@600
+#SBATCH --output=logs/slurm_%j.out
+#SBATCH --error=logs/slurm_%j.err
+# #SBATCH --mem=64G        # descomente se a fila exigir; confirme o limite com o suporte
 
-set -euo pipefail
-
-# Módulos do Coaraci, na ordem usada pelo script de referência do grupo.
-MODULOS="${MODULOS:-gnu12 hwloc cuda python/3.11.7-gcc-12.2.0-jm3y27n}"
-
-# Scratch local do nó. A convenção do Coaraci é /scratch/local/$USER/$SLURM_JOB_ID.
-SCRATCH_RAIZ="${SCRATCH_RAIZ:-/scratch/local/${USER}}"
+# Sem -u: o Lmod (module) e o activate do venv leem variáveis possivelmente
+# não definidas e abortariam o job com "unbound variable".
+set -eo pipefail
 
 PROJETO="${SLURM_SUBMIT_DIR}"
+if [[ ! -f "${PROJETO}/src/train.py" ]]; then
+    echo "ERRO: submeta a partir da raiz do repositório (não achei src/train.py em ${PROJETO})"
+    exit 1
+fi
+
+MODULOS="${MODULOS:-gnu12 hwloc cuda python/3.11.7-gcc-12.2.0-jm3y27n}"
+SCRATCH_RAIZ="${SCRATCH_RAIZ:-/scratch/local/${USER}}"
 TRABALHO="${SCRATCH_RAIZ}/srgan-${SLURM_JOB_ID}"
 
-# Com --ntasks-per-node (em vez de --cpus-per-task) o SLURM não define
-# SLURM_CPUS_PER_TASK. Os workers do DataLoader são dimensionados pelo que
-# estiver disponível, com teto de 8: acima disso o ganho é pequeno e cada
-# worker carrega sua própria cópia do cache de imagens.
-CORES="${SLURM_CPUS_PER_TASK:-${SLURM_NTASKS_PER_NODE:-8}}"
-WORKERS=$(( CORES < 8 ? CORES : 8 ))
+# Memória do cache = CACHE x WORKERS x 15,7 MiB, e de novo para o loader de
+# validação. 4 x 200 -> ~12 GiB (treino) + ~12 GiB (validação).
+WORKERS="${WORKERS:-4}"
+CACHE="${CACHE:-200}"
 
-echo "[$(hostname)] job ${SLURM_JOB_ID}"
-echo "  projeto : ${PROJETO}"
-echo "  scratch : ${TRABALHO}"
-echo "  GPUs    : ${CUDA_VISIBLE_DEVICES:-nenhuma} | cores ${CORES} | workers ${WORKERS}"
+echo "[$(hostname)] job ${SLURM_JOB_ID} | GPUs ${CUDA_VISIBLE_DEVICES:-nenhuma} | workers ${WORKERS} | cache ${CACHE}"
 
-# --- Ambiente ---------------------------------------------------------------
+# --- Ambiente ----------------------------------------------------------------
 module purge
 module load ${MODULOS}
 source "${PROJETO}/venv/bin/activate"
-
-# Explícito, em vez de contar com o SLURM iniciar no diretório de submissão:
-# 'python -m src.train' precisa da raiz do projeto no caminho de import.
 cd "${PROJETO}"
 
-# --- Dados para o scratch do nó ---------------------------------------------
-# Ler as fatias do filesystem compartilhado durante horas de treino o castiga,
-# e são milhares de arquivos pequenos. Duas formas, em ordem de preferência:
-#
-#   1. data/raw.zip + sbcast  — um arquivo só viaja pela rede, descompactado
-#      localmente. É o caminho usado pelo grupo. Criar com:
-#          cd data && zip -r -0 raw.zip raw/     (-0: sem compressão, TIFF já é)
-#   2. cp -r                  — funciona, mas copia arquivo a arquivo.
+# --- Verificações rápidas, antes de mover 15 GiB -----------------------------
+python - <<'EOF'
+import torch, sys
+if not torch.cuda.is_available():
+    sys.exit("ERRO: torch não enxerga GPU (build CPU-only ou CUDA incompatível com o driver)")
+print(f"torch {torch.__version__} | {torch.cuda.device_count()} GPU(s): {torch.cuda.get_device_name(0)}")
+EOF
+
+TORCH_HOME="${TORCH_HOME:-${HOME}/.cache/torch}"
+export TORCH_HOME
+if [[ ! -f "${TORCH_HOME}/hub/checkpoints/vgg19-dcbb9e9d.pth" ]]; then
+    echo "ERRO: pesos da VGG19 ausentes em ${TORCH_HOME}. No nó de login, rode:"
+    echo "  venv/bin/python -c 'from torchvision.models import vgg19, VGG19_Weights; vgg19(weights=VGG19_Weights.DEFAULT)'"
+    exit 1
+fi
+
+# --- Dados para o scratch do nó ----------------------------------------------
 mkdir -p "${TRABALHO}/data"
 
-if [[ -f "${PROJETO}/data/raw.zip" ]] && command -v sbcast >/dev/null 2>&1; then
-    echo "Enviando data/raw.zip para o scratch via sbcast..."
-    sbcast -f "${PROJETO}/data/raw.zip" "${TRABALHO}/raw.zip"
-    unzip -q "${TRABALHO}/raw.zip" -d "${TRABALHO}/data/"
-    rm -f "${TRABALHO}/raw.zip"
-else
-    echo "Copiando data/raw para o scratch (sem raw.zip; ver nota no script)..."
-    cp -r "${PROJETO}/data/raw" "${TRABALHO}/data/"
-fi
-
-cp -r "${PROJETO}/data/step_edges" "${TRABALHO}/data/" 2>/dev/null || \
-    echo "AVISO: sem data/step_edges — o treino roda, mas sem a validação de MTF"
-
-echo "Fatias no scratch: $(ls -1 "${TRABALHO}/data/raw" | wc -l)"
-
-# O checkpoint de retomada também precisa estar no scratch
-ARG_RESUME=""
-if [[ -n "${RESUME:-}" ]]; then
-    cp "${PROJETO}/${RESUME}" "${TRABALHO}/retomar.pth"
-    ARG_RESUME="--resume ${TRABALHO}/retomar.pth"
-    echo "Retomando de ${RESUME}"
-fi
-
-# Traz os resultados de volta mesmo se o job for interrompido por walltime ou
-# erro: sem isto, um treino de horas some junto com o scratch do nó.
+# Recuperação: roda em qualquer saída (fim normal, erro ou walltime)
 recuperar_resultados() {
     if [[ ! -d "${TRABALHO}/run" ]]; then
-        echo "AVISO: nada a recuperar — o treino não chegou a gravar ${TRABALHO}/run"
+        echo "AVISO: nada a recuperar em ${TRABALHO}/run"
         return
     fi
     mkdir -p "${PROJETO}/runs"
@@ -111,21 +88,43 @@ recuperar_resultados() {
         echo "Resultados em ${PROJETO}/runs/${SLURM_JOB_ID}"
         rm -rf "${TRABALHO}"
     else
-        echo "ERRO: falha ao copiar os resultados; eles seguem em ${TRABALHO}/run"
+        echo "ERRO: falha ao copiar; resultados seguem em ${TRABALHO}/run"
     fi
 }
 trap recuperar_resultados EXIT
 
-# --- Treinamento ------------------------------------------------------------
-# --run-dir agrupa config.json, logs, pesos e amostras desta execução num lugar
-# só, de modo que jobs simultâneos não escrevam uns por cima dos outros.
-# As GPUs do nó são usadas automaticamente (DataParallel) e --batch-size é o
-# batch TOTAL, dividido entre elas.
-# python -u complementa o flush=True dos prints: nada fica preso no buffer e o
-# out_%j.txt acompanha o treino em tempo real.
-#
-# Os valores de --tiff-range, --split-gap e --min-nonzero vêm da caracterização
-# em docs/dataset.md; leia-a antes de alterá-los.
+if [[ -f "${PROJETO}/data/raw.zip" ]] && command -v sbcast >/dev/null 2>&1; then
+    echo "Enviando data/raw.zip via sbcast..."
+    sbcast -f "${PROJETO}/data/raw.zip" "${TRABALHO}/raw.zip"
+    unzip -q "${TRABALHO}/raw.zip" -d "${TRABALHO}/data/"
+    rm -f "${TRABALHO}/raw.zip"
+else
+    echo "Copiando data/raw (sem raw.zip)..."
+    cp -r "${PROJETO}/data/raw" "${TRABALHO}/data/"
+fi
+cp -r "${PROJETO}/data/step_edges" "${TRABALHO}/data/" 2>/dev/null || true
+
+N_FATIAS=$(find "${TRABALHO}/data/raw" -maxdepth 1 -type f \( -name '*.tif*' -o -name '*.fits' \) | wc -l)
+N_BORDAS=$(find "${TRABALHO}/data/step_edges" -maxdepth 1 -type f \( -name '*.tif*' -o -name '*.fits' -o -name '*.png' \) 2>/dev/null | wc -l)
+echo "Fatias no scratch: ${N_FATIAS} | phantoms de borda: ${N_BORDAS}"
+if (( N_FATIAS < 1000 )); then
+    echo "AVISO: só ${N_FATIAS} fatias — com val/test 0,10 e gap 30 a divisão fica pobre ou impossível"
+fi
+if (( N_BORDAS == 0 )); then
+    echo "AVISO: sem phantoms de borda — o treino roda, mas sem a validação de MTF"
+fi
+
+ARG_RESUME=""
+if [[ -n "${RESUME:-}" ]]; then
+    cp "${PROJETO}/${RESUME}" "${TRABALHO}/retomar.pth"
+    ARG_RESUME="--resume ${TRABALHO}/retomar.pth"
+    echo "Retomando de ${RESUME}"
+fi
+
+# --- Treinamento -------------------------------------------------------------
+# Roda em segundo plano para que o bash consiga reagir ao USR1, que o SLURM
+# envia 10 min antes do walltime (--signal=B:USR1@600). Em primeiro plano, o
+# trap só rodaria depois que o python terminasse.
 python -u -m src.train \
     --data-dir      "${TRABALHO}/data/raw" \
     --step-edge-dir "${TRABALHO}/data/step_edges" \
@@ -142,10 +141,22 @@ python -u -m src.train \
     --val-fraction 0.10 \
     --test-fraction 0.10 \
     --split-gap 30 \
-    --cache-images 500 \
+    --cache-images "${CACHE}" \
     --amp \
     --num-workers "${WORKERS}" \
     --seed 42 \
-    ${ARG_RESUME}
+    ${ARG_RESUME} &
+PID=$!
 
-echo "Treinamento concluído."
+trap 'echo "Walltime próximo: encerrando o treino (o último checkpoint completo vale)"; kill -TERM ${PID} 2>/dev/null' USR1
+
+set +e
+wait "${PID}"; RC=$?
+# Se o wait foi interrompido pelo USR1, espera o python de fato terminar
+if (( RC > 128 )) && kill -0 "${PID}" 2>/dev/null; then
+    wait "${PID}"; RC=$?
+fi
+set -e
+
+echo "Treino terminou com código ${RC}"
+exit ${RC}

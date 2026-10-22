@@ -236,7 +236,14 @@ sbatch --gpus 1 --time 8:00:00 scripts/train_coaraci.slurm
 sbatch --mail-user=SEU_EMAIL --mail-type=END,FAIL scripts/train_coaraci.slurm
 ```
 
-**Antes da primeira submissão**, crie o venv no cluster e coloque as fatias em `data/raw/`.
+**Antes da primeira submissão**, crie o venv no cluster (depois de carregar os módulos), baixe os pesos da VGG19 no nó de login — os nós de computação podem não ter internet —, coloque as fatias em `data/raw/` e crie a pasta dos logs do SLURM, que ele não cria sozinho:
+
+```bash
+venv/bin/python -c "from torchvision.models import vgg19, VGG19_Weights; vgg19(weights=VGG19_Weights.DEFAULT)"
+mkdir -p logs
+```
+
+O script confere GPU, pesos da VGG e raiz do repositório antes de copiar os dados, e falha em segundos se algo faltar. A saída do job vai para `logs/slurm_<job>.out`. Por padrão usa 4 workers com cache de 200 fatias (~26 GiB de RAM somando treino e validação); ajuste com `--export=ALL,WORKERS=2,CACHE=500`. Dez minutos antes do walltime o SLURM avisa o script (`--signal=B:USR1@600`), que encerra o treino e traz os resultados de volta. Para treinos maiores que o walltime, encadeie jobs com `--dependency=afterany` (exemplo no cabeçalho do script).
 
 **Dados para o nó.** São milhares de arquivos pequenos, e copiá-los um a um pelo filesystem compartilhado é lento. Se existir `data/raw.zip`, o script o envia com `sbcast` — um arquivo só viaja pela rede — e descompacta localmente:
 
