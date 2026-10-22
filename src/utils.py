@@ -130,7 +130,12 @@ def save_checkpoint(path, epoch, generator, discriminator, optimizer_G, optimize
             "python": random.getstate(),
         },
     }
-    torch.save(state, path)
+    # Grava num temporário e só então renomeia: os.replace é atômico, então um
+    # job morto no meio da gravação (walltime do SLURM) deixa o checkpoint
+    # anterior intacto em vez de um arquivo truncado que impede a retomada.
+    tmp = path + ".tmp"
+    torch.save(state, tmp)
+    os.replace(tmp, path)
 
 def load_checkpoint(path, generator, discriminator, optimizer_G, optimizer_D, device,
                     arquitetura=None, scalers=None, schedulers=None):
