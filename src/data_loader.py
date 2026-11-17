@@ -217,7 +217,7 @@ def load_image_as_array(img_path, fits_normalization="minmax", fits_range=None,
 class NeutronDataset(Dataset):
     def __init__(self, root_dir, patch_size=256, lr_scale=4, arquivos=None,
                  patches_per_image=1, min_nonzero=0.0, max_tentativas=10,
-                 cache_images=0,
+                 cache_images=0, semente_fixa=None,
                  fits_normalization="minmax", fits_range=None,
                  tiff_normalization="dtype", tiff_range=None):
         """
@@ -246,6 +246,12 @@ class NeutronDataset(Dataset):
             então a memória total é cache x num_workers. Como o cache remove o
             gargalo, poucos workers com cache grande costumam render mais que
             muitos workers sem cache.
+        semente_fixa: com um inteiro, o recorte e o espelhamento de cada
+            índice passam a ser sempre os mesmos (sorteados com semente própria
+            do índice, não com o gerador global). É o modo da VALIDAÇÃO: sem
+            ele, cada época avalia recortes diferentes, o val_psnr oscila
+            ~0,4 dB só por isso (visto no job 1879476) e a escolha do best.pth
+            vira sorteio. Com None (padrão, treino), tudo é sorteado a cada acesso.
         fits_normalization / fits_range: ver load_image_as_array (só afetam .fits).
         tiff_normalization / tiff_range: idem, para .tif/.tiff.
         """
@@ -259,6 +265,7 @@ class NeutronDataset(Dataset):
         self.max_tentativas = max(1, int(max_tentativas))
         self.cache_images = int(cache_images)
         self._cache = {}
+        self.semente_fixa = semente_fixa
         self.fits_normalization = fits_normalization
         self.fits_range = fits_range
         self.tiff_normalization = tiff_normalization
@@ -318,20 +325,27 @@ class NeutronDataset(Dataset):
             # Um recorte quase todo nulo não é dado: é a borda do círculo de
             # reconstrução. Treinar sobre ele ensina o Gerador a reproduzir
             # vazio. Resorteia até passar no critério, ou aceita o último.
+            # Com semente_fixa, os sorteios saem de geradores próprios deste
+            # índice: o mesmo idx dá sempre o mesmo recorte, em qualquer worker.
+            if self.semente_fixa is not None:
+                semente = self.semente_fixa * 1_000_003 + idx
+                g_torch = torch.Generator().manual_seed(semente)
+                sorteio = random.Random(semente).random
+            else:
+                g_torch, sorteio = None, random.random
             for _ in range(self.max_tentativas):
-                i, j, h_crop, w_crop = transforms.RandomCrop.get_params(
-                    img, output_size=(self.patch_size, self.patch_size)
-                )
-                img_hr = TF.crop(img, i, j, h_crop, w_crop)
+                i = int(torch.randint(0, h - self.patch_size + 1, (1,), generator=g_torch))
+                j = int(torch.randint(0, w - self.patch_size + 1, (1,), generator=g_torch))
+                img_hr = TF.crop(img, i, j, self.patch_size, self.patch_size)
                 if self.min_nonzero <= 0.0:
                     break
                 if (img_hr > 0).to(torch.float32).mean().item() >= self.min_nonzero:
                     break
 
             # --- 3. Data Augmentation Científico ---
-            if random.random() > 0.5:
+            if sorteio() > 0.5:
                 img_hr = TF.hflip(img_hr)
-            if random.random() > 0.5:
+            if sorteio() > 0.5:
                 img_hr = TF.vflip(img_hr)
 
             # --- 4. Degradação Realista ---
@@ -407,7 +421,7 @@ class StepEdgeDataset(Dataset):
 def get_dataloader(root_dir, batch_size=8, shuffle=True, num_workers=4,
                    patch_size=256, lr_scale=4, patches_per_image=1,
                    min_nonzero=0.0, cache_images=0, pin_memory=False,
-                   arquivos=None, drop_last=True,
+                   arquivos=None, drop_last=True, semente_fixa=None,
                    fits_normalization="minmax", fits_range=None,
                    tiff_normalization="dtype", tiff_range=None):
     dataset = NeutronDataset(root_dir, patch_size=patch_size, lr_scale=lr_scale,
@@ -415,6 +429,7 @@ def get_dataloader(root_dir, batch_size=8, shuffle=True, num_workers=4,
                              patches_per_image=patches_per_image,
                              min_nonzero=min_nonzero,
                              cache_images=cache_images,
+                             semente_fixa=semente_fixa,
                              fits_normalization=fits_normalization,
                              fits_range=fits_range,
                              tiff_normalization=tiff_normalization,

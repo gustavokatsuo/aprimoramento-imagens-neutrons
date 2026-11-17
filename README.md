@@ -91,18 +91,26 @@ aprimoramento-imagens-neutrons/
 ├── docs/
 │   ├── plano_ic_gustavo.pdf
 │   ├── dataset.md              # Caracterização dos dados e decisões que decorrem
+│   ├── decisoes.md             # Decisões tomadas e em aberto (com o orientador)
+│   ├── diagnostico_1879476.md  # Por que a fase GAN do job 1879476 colapsou
 │   └── resolution_metrics.md   # Métricas de resolução: definição e limitações
 ├── notebooks/
 │   └── arquitetura_ic.ipynb    # Protótipo inicial (ver nota abaixo)
 ├── scripts/
 │   ├── inspecionar_dados.py    # Diagnóstico de um conjunto antes de treinar
+│   ├── gerar_phantoms.py       # Phantoms de borda SINTÉTICOS para a MTF
+│   ├── diagnostico_1879476.py  # Medidas do diagnóstico do job 1879476
+│   ├── rodada_variantes.sh     # SRResNet + variantes GAN + avaliação, num job
 │   └── train_coaraci.slurm     # Submissão no cluster Coaraci
+├── tests/
+│   └── test_rodada_cpu.py      # Testes em CPU da rodada inteira
 ├── src/                        # Código-fonte modularizado
 │   ├── __init__.py
 │   ├── data_loader.py          # Leitura científica, degradação e datasets
 │   ├── model.py                # Gerador, Discriminador e extrator VGG
 │   ├── train.py                # Loop de treino e validação de bordas
 │   ├── utils.py                # Métricas, checkpoints, MTF e logs
+│   ├── _versao.py              # Commit gravado pelo 'git archive'
 │   └── classical_baselines.py  # Bicúbico, Lanczos e unsharp para comparação
 ├── runs/                       # Saídas por execução (não versionadas)
 ├── requirements.txt
@@ -227,18 +235,16 @@ Avalia bicúbico, Lanczos, bicúbico+unsharp e a SRGAN no **mesmo** pipeline deg
 sbatch scripts/train_coaraci.slurm
 ```
 
-O script copia os dados para o scratch do nó, treina, e traz os resultados de volta para `runs/$SLURM_JOB_ID` — inclusive se o job for interrompido por walltime. Múltiplas GPUs do nó são usadas automaticamente via `DataParallel`.
+O script copia os dados para o scratch do nó, gera phantoms de borda sintéticos se não vierem phantoms com os dados, roda a **rodada de variantes** (`scripts/rodada_variantes.sh`) e traz tudo de volta para `runs/$SLURM_JOB_ID` — inclusive se o job for interrompido por walltime.
 
-Para retomar um treino interrompido:
+A rodada treina, num único job, uma SRResNet (`V0_srresnet`) e três receitas de fase GAN partindo dela (`V1_perceptual`, `V2_adv_forte`, `V3_patch_sn`), dividindo o tempo pelo relógio, e termina com a comparação automática contra bicúbica, Lanczos e unsharp masking no bloco de teste (`runs/<job>/avaliacao/relatorio_final.txt`). Por que essas variantes: `docs/diagnostico_1879476.md`. A mesma rodada roda localmente, em escala reduzida, com `scripts/rodada_variantes.sh <dados> <bordas> <saída>` (variáveis de ambiente no cabeçalho do script).
 
-```bash
-sbatch --export=ALL,RESUME=runs/<job>/weights/checkpoint_last.pth scripts/train_coaraci.slurm
-```
+Cada treino grava, além do CSV por época (agora com tempo por época, pico de memória, energia de grade e a força de cada termo da perda), `weights/best.pth` (melhor `val_psnr`, avaliado a cada época sobre recortes de validação fixos), `weights/gen_ultimo.pth` e `logs/resumo.json`.
 
-O script está preenchido com os valores do Coaraci — partição `gpu-x`, 2 GPUs, módulos `gnu12 hwloc cuda python/3.11.7-gcc-12.2.0-jm3y27n`, scratch em `/scratch/local/$USER` — e submete sem edição. Qualquer opção passada ao `sbatch` sobrepõe as diretivas:
+O script está preenchido com os valores do Coaraci — partição `gpu-x`, 1 GPU A30, módulos `gnu12 hwloc cuda python/3.11.7-gcc-12.2.0-jm3y27n`, scratch em `/scratch/local/$USER` — e submete sem edição. Qualquer opção passada ao `sbatch` sobrepõe as diretivas:
 
 ```bash
-sbatch --gpus 1 --time 8:00:00 scripts/train_coaraci.slurm
+sbatch --time 8:00:00 scripts/train_coaraci.slurm
 sbatch --mail-user=SEU_EMAIL --mail-type=END,FAIL scripts/train_coaraci.slurm
 ```
 
@@ -249,7 +255,9 @@ venv/bin/python -c "from torchvision.models import vgg19, VGG19_Weights; vgg19(w
 mkdir -p logs
 ```
 
-O script confere GPU, pesos da VGG e raiz do repositório antes de copiar os dados, e falha em segundos se algo faltar. A saída do job vai para `logs/slurm_<job>.out`. Por padrão usa 4 workers com cache de 200 fatias (~26 GiB de RAM somando treino e validação); ajuste com `--export=ALL,WORKERS=2,CACHE=500`. Dez minutos antes do walltime o SLURM avisa o script (`--signal=B:USR1@600`), que encerra o treino e traz os resultados de volta. Para treinos maiores que o walltime, encadeie jobs com `--dependency=afterany` (exemplo no cabeçalho do script).
+O script confere GPU, pesos da VGG e raiz do repositório antes de copiar os dados, e falha em segundos se algo faltar. A saída do job vai para `logs/slurm_<job>.out`. Por padrão usa 4 workers com cache de 200 fatias (~26 GiB de RAM somando treino e validação); ajuste com `--export=ALL,WORKERS=2,CACHE=500`. As fases de treino terminam ~60 min antes do walltime para dar lugar à avaliação final; como rede de segurança, 45 min antes do fim o SLURM avisa o script (`--signal=B:USR1@2700`), que interrompe o treino em andamento e segue para a avaliação.
+
+**Procedência.** O `config.json` de cada treino registra o commit e o SHA-256 de cada arquivo de código. Se o código for levado ao cluster sem `git clone`, gere o pacote com `git archive --format=zip -o codigo.zip HEAD`: o commit fica gravado em `src/_versao.py`. Sem nenhum dos dois, o job avisa em destaque que não há commit.
 
 **Dados para o nó.** São milhares de arquivos pequenos, e copiá-los um a um pelo filesystem compartilhado é lento. Se existir `data/raw.zip`, o script o envia com `sbcast` — um arquivo só viaja pela rede — e descompacta localmente:
 
@@ -258,6 +266,15 @@ cd data && zip -r -0 raw.zip raw/     # -0: sem compressão, TIFF já é comprim
 ```
 
 Sem o zip, o script cai para `cp -r`, que também funciona. Os resultados voltam do scratch para `runs/$SLURM_JOB_ID` mesmo se o job for interrompido por walltime, e o scratch é limpo depois.
+
+### Testes antes de mandar ao cluster
+
+```bash
+python -m unittest tests.test_rodada_cpu -v            # tudo em CPU, ~20 min
+RAPIDO=1 python -m unittest tests.test_rodada_cpu -v   # sem os de ponta a ponta, ~2 min
+```
+
+Com dados sintéticos e poucas fatias, cobrem: retomada de checkpoint (idêntica à execução contínua), interrupção por sinal (aviso de walltime), corte pelo orçamento de tempo, `best.pth`, procedência do código (cópia solta e `git archive`), a rodada inteira em miniatura até o relatório final, a rodada interrompida no meio e o próprio `scripts/train_coaraci.slurm` com o ambiente do SLURM simulado. O que eles **não** cobrem está em `docs/diagnostico_1879476.md` §9.
 
 ### Experimento: profundidade da VGG e peso do termo adversarial
 

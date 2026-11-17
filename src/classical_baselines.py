@@ -21,10 +21,23 @@ Roda o MESMO pipeline degradação -> reconstrução -> métrica do treino da GA
     entrada que nunca viu e o PSNR de todos os métodos muda de escala, e a
     tabela sai com cara de válida e conclusão invertida.
 
+  - Vários Geradores na mesma tabela: --gen-weights aceita ROTULO=caminho
+    repetido (ex.: as variantes de uma rodada). Todos precisam ter sido
+    treinados com a mesma normalização e divisão; o script confere.
+  - Duas regiões de PSNR: 'psnr' sobre o recorte inteiro e 'psnr_fov' só
+    dentro do círculo de reconstrução (pixels com HR > 0). O fundo zerado é
+    trivial para a bicúbica e infla o PSNR de todos (decisão A6 em
+    docs/decisoes.md). Mais a energia de grade do resíduo (utils.energia_grade).
+
 Uso:
     # com pesos: config.json encontrado ao lado deles, nada a repetir
     python -m src.classical_baselines --data-dir data/raw \\
         --gen-weights runs/<job>/weights/gen_epoch_99.pth
+
+    # várias variantes de uma vez
+    python -m src.classical_baselines --data-dir data/raw \\
+        --gen-weights V0=runs/<job>/V0_srresnet/weights/best.pth \\
+                      V2=runs/<job>/V2_adv_forte/weights/best.pth
 
     # só os clássicos, com a configuração de uma execução
     python -m src.classical_baselines --data-dir data/raw \\
@@ -46,7 +59,8 @@ from PIL import Image
 from src.data_loader import (load_image_as_array, list_supported_images,
                              dividir_pilha, StepEdgeDataset)
 from src.model import Generator
-from src.utils import calculate_psnr, calculate_ssim, denormalize, mtf10_from_edge
+from src.utils import (calculate_psnr, calculate_ssim, denormalize, mtf10_from_edge,
+                       energia_grade, piso_grade)
 
 # Argumentos que precisam ser idênticos aos do treino, com o valor usado
 # quando não há config.json (os mesmos padrões de src/train.py). data_dir
@@ -67,9 +81,11 @@ def parse_args():
     parser.add_argument("--data-dir", type=str, default="data/raw")
     parser.add_argument("--patch-size", type=int, default=512,
                         help="Recorte central para avaliação (0 = imagem inteira)")
-    parser.add_argument("--gen-weights", type=str, default=None,
-                        help="Pesos do Gerador (ex.: runs/<job>/weights/gen_epoch_99.pth) "
-                             "para incluir a SRGAN na tabela")
+    parser.add_argument("--gen-weights", type=str, nargs="+", default=None,
+                        metavar="[ROTULO=]CAMINHO",
+                        help="Pesos de um ou mais Geradores (ex.: runs/<job>/weights/"
+                             "gen_epoch_99.pth) para incluir na tabela. Sem rótulo, "
+                             "a linha se chama 'srgan'")
     parser.add_argument("--config", type=str, default=None,
                         help="config.json da execução de treino. Omitido, é procurado "
                              "em <execução>/logs/config.json a partir de --gen-weights")
@@ -104,7 +120,29 @@ def parse_args():
     herdados.add_argument("--val-fraction", type=float, default=None)
     herdados.add_argument("--test-fraction", type=float, default=None)
     herdados.add_argument("--split-gap", type=int, default=None)
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    # --gen-weights vira um dicionário ordenado {rótulo: caminho}
+    pesos = {}
+    for item in args.gen_weights or []:
+        rotulo, sep, caminho = item.partition("=")
+        if not sep:
+            rotulo, caminho = "srgan", item
+        if rotulo in pesos or rotulo in ("bicubic", "lanczos", "bicubic+unsharp", "hr"):
+            parser.error(f"rótulo repetido ou reservado em --gen-weights: {rotulo!r}")
+        if not os.path.isfile(caminho):
+            parser.error(f"--gen-weights: '{caminho}' não existe")
+        pesos[rotulo] = caminho
+    args.pesos = pesos
+    # _localizar_config procura o config.json a partir do PRIMEIRO Gerador;
+    # resolver_configuracao confere que os demais foram treinados igual
+    args.gen_weights = next(iter(pesos.values()), None)
+    return args
+
+def _config_dos_pesos(caminho_pesos):
+    """<execução>/logs/config.json a partir de <execução>/weights/<arquivo>."""
+    execucao = os.path.dirname(os.path.dirname(os.path.abspath(caminho_pesos)))
+    return os.path.join(execucao, "logs", "config.json")
 
 def _localizar_config(args):
     """
@@ -118,8 +156,7 @@ def _localizar_config(args):
             raise SystemExit(f"ERRO: --config '{args.config}' não existe.")
         return args.config
     if args.gen_weights:
-        execucao = os.path.dirname(os.path.dirname(os.path.abspath(args.gen_weights)))
-        candidato = os.path.join(execucao, "logs", "config.json")
+        candidato = _config_dos_pesos(args.gen_weights)
         if os.path.isfile(candidato):
             return candidato
         if not args.sem_config:
@@ -163,6 +200,22 @@ def resolver_configuracao(args):
             setattr(args, chave, gravados[chave])
         elif passado is None:
             setattr(args, chave, padrao)
+
+    # Com vários Geradores, todos precisam ter visto a mesma normalização e a
+    # mesma divisão: senão a mesma tabela compararia modelos em condições
+    # diferentes, e o bloco de teste de um poderia ser treino de outro
+    for rotulo, caminho in list(args.pesos.items())[1:]:
+        outro = _config_dos_pesos(caminho)
+        if not os.path.isfile(outro):
+            if not args.sem_config:
+                conflitos.append(f"{rotulo}: sem config.json em '{outro}'")
+            continue
+        with open(outro) as f:
+            seus = json.load(f).get("argumentos", {})
+        for chave in CHAVES_HERDADAS:
+            if chave in seus and not _mesmo_valor(seus[chave], getattr(args, chave)):
+                conflitos.append(f"{rotulo}: {chave}={seus[chave]}, mas o primeiro "
+                                 f"Gerador usou {getattr(args, chave)}")
 
     if conflitos:
         raise SystemExit("ERRO: argumentos diferentes dos do treino:\n  "
@@ -218,11 +271,11 @@ def unsharp_mask(img, amount=1.0, kernel_size=5):
     blurred = TF.gaussian_blur(img, kernel_size=kernel_size)
     return (img + amount * (img - blurred)).clamp(0.0, 1.0)
 
-def reconstruir(img_lr, hr_size, generator, device, unsharp_amount):
+def reconstruir(img_lr, hr_size, geradores, device, unsharp_amount):
     """
     Todas as reconstruções a partir da MESMA imagem LR, em [0, 1]. Usada nas
     fatias e nos phantoms, para que PSNR/SSIM e MTF vejam exatamente as mesmas
-    saídas de cada método.
+    saídas de cada método. 'geradores' é {rótulo: Generator} (pode ser vazio).
     """
     recon = {
         "bicubic": upscale_bicubic(img_lr, hr_size),
@@ -230,14 +283,14 @@ def reconstruir(img_lr, hr_size, generator, device, unsharp_amount):
     }
     recon["bicubic+unsharp"] = unsharp_mask(recon["bicubic"], amount=unsharp_amount)
 
-    if generator is not None:
+    for rotulo, generator in geradores.items():
         with torch.no_grad():
-            gen_out = generator(to_model_range(img_lr).to(device)).cpu()
+            gen_out = generator(to_model_range(img_lr).to(device)).float().cpu()
         # Saída do Gerador já está em [-1, 1] (Tanh); volta para [0, 1]
-        recon["srgan"] = ((gen_out + 1.0) / 2.0).clamp(0.0, 1.0)
+        recon[rotulo] = ((gen_out + 1.0) / 2.0).clamp(0.0, 1.0)
     return recon
 
-def avaliar_bordas(args, generator, device, methods):
+def avaliar_bordas(args, geradores, device, methods):
     """
     MTF10 de cada método sobre os phantoms de borda, mais a da referência HR.
 
@@ -268,13 +321,19 @@ def avaliar_bordas(args, generator, device, methods):
         print(f"\nAVISO: nenhum phantom de borda em '{args.step_edge_dir}' — "
               f"MTF não medida.", flush=True)
         return []
+    if any(os.path.basename(f).startswith("sintetico_") for f in dataset.files):
+        print("\nATENÇÃO: há phantoms SINTÉTICOS (scripts/gerar_phantoms.py). A MTF "
+              "neles mede quanto cada método INVERTE A DEGRADAÇÃO SINTÉTICA do "
+              "projeto (blur k=3 + redução bicúbica 4x). NÃO é a resolução do "
+              "equipamento: essa só um phantom físico adquirido no sistema mede.",
+              flush=True)
 
     rows = []
     for amostra in dataset:
         # O dataset entrega [-1, 1]; as reconstruções trabalham em [0, 1]
         img_lr = denormalize(amostra["lr"]).unsqueeze(0).clamp(0.0, 1.0)
         img_hr = denormalize(amostra["hr"]).unsqueeze(0).clamp(0.0, 1.0)
-        recon = reconstruir(img_lr, img_hr.shape[2:], generator, device,
+        recon = reconstruir(img_lr, img_hr.shape[2:], geradores, device,
                             args.unsharp_amount)
         recon["hr"] = img_hr
 
@@ -338,15 +397,16 @@ def evaluate(args):
     print(f"Conjunto '{args.split}': {len(files)} imagem(ns), de "
           f"{os.path.basename(files[0])} a {os.path.basename(files[-1])}", flush=True)
 
-    # Carrega o Gerador da SRGAN, se solicitado
-    generator = None
-    if args.gen_weights:
+    # Carrega os Geradores pedidos, na ordem dada
+    geradores = {}
+    for rotulo, caminho in args.pesos.items():
         generator = Generator().to(device)
-        generator.load_state_dict(torch.load(args.gen_weights, map_location=device,
+        generator.load_state_dict(torch.load(caminho, map_location=device,
                                              weights_only=True))
-        generator.eval()
+        geradores[rotulo] = generator.eval()
+        print(f"Gerador '{rotulo}': {caminho}", flush=True)
 
-    methods = ["bicubic", "lanczos", "bicubic+unsharp"] + (["srgan"] if generator else [])
+    methods = ["bicubic", "lanczos", "bicubic+unsharp"] + list(geradores)
     rows = []
 
     for img_path in files:
@@ -362,39 +422,58 @@ def evaluate(args):
         img_hr = TF.center_crop(img, (crop, crop))
 
         img_lr = degrade(img_hr, args.lr_scale)
-        recon = reconstruir(img_lr, (crop, crop), generator, device, args.unsharp_amount)
+        recon = reconstruir(img_lr, (crop, crop), geradores, device, args.unsharp_amount)
 
         # --- Métricas (mesmas funções do treino, domínio [-1, 1]) ---
         hr_model = to_model_range(img_hr)
+        # Círculo de reconstrução: pixels não-nulos da referência
+        fov = img_hr > 0
         for method in methods:
             sr_model = to_model_range(recon[method])
             psnr = calculate_psnr(sr_model, hr_model).item()
+            psnr_fov = (calculate_psnr(sr_model, hr_model, mascara=fov).item()
+                        if fov.any() else float("nan"))
             ssim = calculate_ssim(sr_model, hr_model).item()
-            rows.append({"image": name, "method": method,
-                         "psnr": psnr, "ssim": ssim})
+            grade = energia_grade(sr_model - hr_model)
+            piso = piso_grade(crop, crop)
+            rows.append({"image": name, "method": method, "psnr": psnr,
+                         "psnr_fov": psnr_fov, "ssim": ssim, "grade_pct": grade})
 
     # --- Tabela-resumo (média por método) ---
-    print(f"\n{'Método':<20} {'PSNR médio (dB)':>16} {'SSIM médio':>12}   (n={len(files)} imagens)", flush=True)
-    print("-" * 55, flush=True)
+    # O ganho é sempre contra a bicúbica NAS MESMAS imagens (diferença das
+    # médias = média das diferenças, porque o conjunto é o mesmo)
+    def media(m, chave):
+        vals = [r[chave] for r in rows if r["method"] == m and not math.isnan(r[chave])]
+        return sum(vals) / len(vals) if vals else float("nan")
+
+    print(f"\nConjunto '{args.split}', n={len(files)} imagens. 'fov' = só dentro do "
+          f"círculo de reconstrução. 'grade' = % da energia do erro em períodos de "
+          f"2/4 px; sem padrão periódico ficaria em ~{piso:.3g}% neste tamanho", flush=True)
+    print(f"{'Método':<20} {'PSNR (dB)':>10} {'ganho':>7} {'PSNR fov':>9} {'ganho':>7} "
+          f"{'SSIM':>7} {'grade %':>8}", flush=True)
+    print("-" * 74, flush=True)
+    base, base_fov = media("bicubic", "psnr"), media("bicubic", "psnr_fov")
     for method in methods:
-        m_rows = [r for r in rows if r["method"] == method]
-        mean_psnr = sum(r["psnr"] for r in m_rows) / len(m_rows)
-        mean_ssim = sum(r["ssim"] for r in m_rows) / len(m_rows)
-        print(f"{method:<20} {mean_psnr:>16.3f} {mean_ssim:>12.4f}", flush=True)
+        p, pf = media(method, "psnr"), media(method, "psnr_fov")
+        print(f"{method:<20} {p:>10.3f} {p - base:>+7.2f} {pf:>9.3f} {pf - base_fov:>+7.2f} "
+              f"{media(method, 'ssim'):>7.4f} {media(method, 'grade_pct'):>8.2f}", flush=True)
 
     # --- CSV com os resultados por imagem ---
     out_dir = os.path.dirname(args.output)
     if out_dir and not os.path.exists(out_dir):
         os.makedirs(out_dir)
     with open(args.output, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["image", "method", "psnr", "ssim"])
+        writer = csv.DictWriter(f, fieldnames=["image", "method", "psnr", "psnr_fov",
+                                               "ssim", "grade_pct"])
         writer.writeheader()
         for r in rows:
-            writer.writerow({**r, "psnr": f"{r['psnr']:.4f}", "ssim": f"{r['ssim']:.5f}"})
+            writer.writerow({**r, "psnr": f"{r['psnr']:.4f}",
+                             "psnr_fov": "" if math.isnan(r["psnr_fov"]) else f"{r['psnr_fov']:.4f}",
+                             "ssim": f"{r['ssim']:.5f}", "grade_pct": f"{r['grade_pct']:.3f}"})
     print(f"\nResultados por imagem salvos em {args.output}", flush=True)
 
     # --- MTF nos phantoms de borda ---
-    rows_mtf = avaliar_bordas(args, generator, device, methods)
+    rows_mtf = avaliar_bordas(args, geradores, device, methods)
     if rows_mtf:
         resumir_bordas(rows_mtf, methods)
         saida_mtf = os.path.splitext(args.output)[0] + "_mtf.csv"

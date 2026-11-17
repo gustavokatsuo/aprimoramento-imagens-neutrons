@@ -1,4 +1,11 @@
-# Dependências diretas do pipeline (src/). As versões são as usadas nos testes.
+# Dependências diretas do pipeline (src/).
+#
+# torch/torchvision: as do ambiente que FUNCIONOU no Coaraci (job 1879476,
+# config.json: torch 2.6.0+cu124, Python 3.11.7, A30). torchvision 0.21.0 é o
+# par oficial do torch 2.6.0. As demais versões são as dos testes locais; as
+# que estavam instaladas no cluster não foram registradas naquele job. A partir
+# da próxima rodada o job grava runs/<job>/ambiente/pip_freeze.txt e as versões
+# em config.json, e este arquivo deve ser conferido contra eles.
 #
 # ATENÇÃO — instalação em cluster com GPU:
 # torch e torchvision precisam do build correspondente ao runtime CUDA do nó.
@@ -6,15 +13,15 @@
 # drivers. Confirme a versão de CUDA disponível (nvidia-smi, ou pergunte ao
 # suporte) e instale a partir do índice correspondente, por exemplo:
 #
-#   pip install torch==2.13.0 torchvision==0.28.0 --index-url https://download.pytorch.org/whl/cu124
+#   pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
 #   pip install -r requirements.txt
 #
 # As bibliotecas CUDA (nvidia-*, triton) vêm como dependências desses pacotes e
 # NÃO devem ser fixadas aqui: fixá-las amarra o projeto ao runtime de uma
 # máquina específica e quebra a instalação em qualquer outra.
 
-torch==2.13.0
-torchvision==0.28.0
+torch==2.6.0
+torchvision==0.21.0
 torchmetrics==1.9.0
 
 numpy==2.4.4

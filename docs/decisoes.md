@@ -110,6 +110,15 @@ python -m src.train --seed 42 --vgg-layer relu5_4 --content-weight 0.006 --discr
 > Os percentuais da tabela foram medidos com tensores aleatórios. A ordem de
 > grandeza é confiável, o valor exato não — remedir com as radiografias.
 
+**Atualização (job 1879476, 16/11/2026):** a primeira rodada completa usou a
+configuração atual e confirmou o problema por outro caminho. O termo
+adversarial terminou em ~1,7% da perda, e no gradiente que chega à imagem o
+termo VGG é ~350–750× maior. Além disso, a perda VGG **sozinha** (sem a MSE de
+pixel, que sai da perda na fase GAN) criou um padrão em grade de período 4 px
+e custou 1–2,5 dB. Isso vale para relu2_2, relu3_4 e relu5_4. Detalhes e
+evidência em `diagnostico_1879476.md`. Para a próxima rodada a proposta é
+manter relu3_4, reescalar para 0,006 e somar a MSE de pixel (ver A7).
+
 ## A2. Arquitetura do Discriminador
 
 **Estado atual:** `compacto` — 6 convoluções até 256 canais, 1,4 M parâmetros
@@ -195,9 +204,118 @@ em dB.
 **O que fecha:** decisão de pesquisa, com o orientador. Depende também de
 acesso ao Avizo ou de uma segmentação equivalente em código.
 
+## A5. Meta de +5 dB: qual modelo, contra qual baseline — **cabe ao orientador**
+
+**Estado atual:** o plano fala em "melhoria mínima de 5 dB" (`utils.calculate_psnr`),
+sem dizer de qual modelo nem sobre o quê.
+
+**Evidência (job 1879476, `diagnostico_1879476.md` §5):** em 24 recortes do
+bloco de teste local, a SRResNet do fim do pré-treino empata com a bicúbica
+(39,10 contra 39,45 dB; −1,3 a +0,7 dB por recorte) `[medido]`. São só 3
+fatias. Mesmo assim, +5 dB sobre a bicúbica parece fora de alcance com a
+degradação atual (σ efetivo 0,69 px + redução 4×, ver A3): a bicúbica já
+recupera muito do que essa degradação tira.
+
+**Opções:**
+
+| modelo | baseline | comentário |
+|---|---|---|
+| SRResNet (só MSE) | bicúbica | o PSNR é o que a SRResNet otimiza; comparação justa e usual |
+| SRGAN (fase GAN) | bicúbica | o GAN troca PSNR por textura; tende a ficar abaixo da SRResNet em dB |
+| qualquer | entrada LR sem interpolação | não é comparável em PSNR (tamanhos diferentes) |
+| SRGAN | SRResNet | mede o efeito do adversarial, não o ganho sobre o clássico |
+
+**Recomendação:** afirmar o ganho de PSNR com a **SRResNet contra a bicúbica
+no bloco de teste**, e avaliar o GAN por MTF10 e inspeção visual (A4). Se a
+diferença medida no teste inteiro ficar longe de 5 dB, registrar isso como
+resultado, com a degradação sintética (A3) como explicação provável, em vez de
+trocar de critério depois de ver o número.
+
+**O que fecha:** conversa com o orientador, de preferência **antes** de ver os
+números da próxima rodada.
+
+## A6. Região do cálculo de PSNR e SSIM
+
+**Estado atual:** sobre o recorte inteiro, incluindo o fundo fora do círculo de
+reconstrução (até 50% do recorte, por `--min-nonzero 0.5`).
+
+**Evidência `[medido]`:** nos recortes com fundo, a SRResNet perde ~1 dB para a
+bicúbica em todos. A `Tanh` nunca chega exatamente a −1, e o gerador deixa de
+36 a 120 níveis de cinza no fundo, onde o correto é 0. A bicúbica reproduz o
+zero exatamente. O fundo também infla o PSNR de todos os métodos, porque é
+trivial.
+
+**Opções:** (a) recorte inteiro, como hoje; (b) só pixels dentro do círculo de
+reconstrução; (c) zerar a saída fora do círculo antes de medir, o que é
+legítimo porque o fundo é zero por definição da reconstrução.
+
+**Recomendação:** relatar (a) e (b) lado a lado, com (b) como principal.
+
+## A7. Manter a MSE de pixel durante a fase GAN
+
+**Estado atual:** na fase GAN a perda de conteúdo é **só** VGG; a MSE sai.
+É o protocolo de Ledig et al. (2017).
+
+**Evidência `[medido]`:** sem a MSE, 100 passos de VGG relu3_4 derrubam ~5,6 dB e criam
+a grade. Com VGG ×0,006 + MSE ×1, o PSNR fica perto do inicial (a grade
+diminui, mas não some).
+
+**Opções:** (a) SRGAN puro, como hoje; (b) somar a MSE de pixel, como fazem
+ESRGAN (Wang et al., 2018) e a maior parte dos trabalhos posteriores.
+
+**Recomendação:** (b). Afasta o trabalho do SRGAN original, e isso precisa ser
+dito no relatório. Mas sem a âncora de pixel o PSNR cai abaixo da bicúbica, e o
+trabalho perde a comparação que pretende fazer.
+
+## A8. Critério de escolha do checkpoint da fase GAN
+
+**Estado atual:** não existe `best.pth`; a próxima rodada vai salvar o melhor
+por `val_psnr`.
+
+**Problema:** numa fase GAN, o melhor PSNR tende a ser o checkpoint *menos*
+adversarial, o mais perto da SRResNet. Escolher por PSNR desfaz parcialmente o
+que o GAN acrescenta.
+
+**Recomendação:** salvar `best.pth` (por `val_psnr`) **e** o último checkpoint,
+e relatar os dois. Se a MTF passar a ser medida por época, ela é candidata a
+critério para os modelos GAN.
+
+**Implementado:** a rodada salva os dois, e a avaliação final inclui
+`<variante>` (best) e `<variante>_ultimo` para V1–V3.
+
+## A9. Peso adversarial fixo ou adaptativo
+
+**Estado atual (próxima rodada):** V2 com peso fixo 1e-3 (D `compacto`); V3
+com peso adaptativo, `--adv-razao 0.5` (D `patch_sn`).
+
+**Evidência `[medido]`** (`diagnostico_1879476.md` §7): com o mesmo peso 1e-3,
+o D `compacto` treinado puxa o Gerador com ~0,5–1,1× a força da VGG, e o
+`patch_sn` com ~0,003×. A normalização espectral limita o gradiente do D, e
+a escala dele muda ordens de grandeza durante o treino.
+
+**Consequência:** V2 e V3 diferem no D **e** no modo do peso. A comparação
+entre eles indica a melhor receita, mas não isola o efeito do discriminador.
+
+**Opções para a rodada seguinte:** (a) manter como está; (b) adaptativo nos
+dois, isolando o D; (c) fixo nos dois, com um peso para o `patch_sn` estimado
+a partir do `adv_weight_efetivo` que esta rodada registrar.
+
+**Recomendação:** decidir depois de ver o `adv_weight_efetivo` e o `grad_adv`
+do V3 nesta rodada. Se o V3 for o melhor, (b) é o experimento que separa as
+duas causas.
+
 ---
 
 # Parte III — Pendências que bloqueiam decisões
+
+## P0. Tempo por época desconhecido
+
+O job 1879476 não registrou tempo, e a saída do SLURM não voltou. Só se sabe
+que 100 épocas couberam em 24 h (≤ ~14 min/época, incluindo a validação).
+
+**Bloqueia:** dividir a próxima rodada por número de épocas. Por isso a
+proposta é dividir o tempo pelo relógio, e registrar tempo e memória no log
+para as rodadas seguintes.
 
 ## P1. Phantoms de borda inexistentes
 

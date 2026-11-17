@@ -108,7 +108,7 @@ class Generator(nn.Module):
 # --- Discriminador (Patch/Logit) ---
 class Discriminator(nn.Module):
     """
-    Duas variantes:
+    Três variantes:
 
     "compacto" (padrão do projeto): 6 convoluções até 256 canais, seguidas de
         AdaptiveAvgPool2d(1). 1,4 M parâmetros.
@@ -126,12 +126,41 @@ class Discriminator(nn.Module):
     interesse; a variante do artigo preserva um mapa 6x6. O pooling adaptativo
     (em vez do flatten direto do artigo) mantém a rede independente do
     --patch-size usado no treino.
+
+    "patch_sn": discriminador LOCAL (PatchGAN, Isola et al. 2017) com
+        normalização espectral (Miyato et al. 2018) e SEM BatchNorm. Devolve um
+        MAPA de logits, um por região de ~70x70 px da entrada, em vez de um
+        único número. Entrou depois do job 1879476 (ver
+        docs/diagnostico_1879476.md): lá o D compacto venceu em poucas épocas,
+        e dois atalhos dele são plausíveis — a BatchNorm vê lotes só reais ou
+        só falsos (a estatística do lote já denuncia a classe) e o
+        AdaptiveAvgPool2d(1) resume a imagem inteira num vetor. A normalização
+        espectral limita a constante de Lipschitz do D, o que impede que ele
+        fique arbitrariamente confiante.
     """
     def __init__(self, in_channels=1, variante="compacto"):
         super(Discriminator, self).__init__()
-        if variante not in ("compacto", "artigo"):
+        if variante not in ("compacto", "artigo", "patch_sn"):
             raise ValueError(f"variante de Discriminador desconhecida: {variante!r}")
         self.variante = variante
+
+        if variante == "patch_sn":
+            sn = nn.utils.parametrizations.spectral_norm
+
+            def bloco_sn(in_f, out_f, stride):
+                return [sn(nn.Conv2d(in_f, out_f, kernel_size=4, stride=stride, padding=1)),
+                        nn.LeakyReLU(0.2, inplace=True)]
+
+            # Configuração do PatchGAN 70x70 de pix2pix: 3 convs de stride 2,
+            # uma de stride 1, e a cabeça de 1 canal. Campo receptivo de 70 px.
+            self.model = nn.Sequential(
+                *bloco_sn(in_channels, 64, 2),
+                *bloco_sn(64, 128, 2),
+                *bloco_sn(128, 256, 2),
+                *bloco_sn(256, 512, 1),
+                sn(nn.Conv2d(512, 1, kernel_size=4, stride=1, padding=1)),
+            )
+            return
 
         def discriminator_block(in_f, out_f, stride):
             return nn.Sequential(

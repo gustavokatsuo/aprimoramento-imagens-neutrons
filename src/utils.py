@@ -17,7 +17,7 @@ def denormalize(tensors):
     """
     return (tensors + 1.0) / 2.0
 
-def calculate_psnr(img1, img2):
+def calculate_psnr(img1, img2, mascara=None):
     """
     Calcula o Peak Signal-to-Noise Ratio (PSNR).
     Alvo da IC: Melhoria mínima de 5 dB.
@@ -27,13 +27,21 @@ def calculate_psnr(img1, img2):
     data_range=65535, pois o PSNR é invariante a reescala linear conjunta.
     O clamp protege contra reconstruções (ex.: baselines bicúbicos) que
     ultrapassem levemente o intervalo por overshoot de interpolação.
+
+    'mascara' (opcional, booleana, mesmo shape): o MSE é tomado só nos pixels
+    marcados. Serve para medir dentro do círculo de reconstrução, sem o fundo
+    zerado, que é trivial para a bicúbica e infla o PSNR de todos os métodos
+    (ver decisão A6 em docs/decisoes.md).
     """
     # 1. Desnormaliza as imagens para garantir o domínio [0, 1] e o cálculo correto do MAX_I
     img1_norm = denormalize(img1).clamp(0.0, 1.0)
     img2_norm = denormalize(img2).clamp(0.0, 1.0)
 
     # 2. Calcula o MSE nas imagens corrigidas
-    mse = torch.mean((img1_norm - img2_norm) ** 2)
+    if mascara is not None:
+        mse = torch.mean((img1_norm - img2_norm)[mascara] ** 2)
+    else:
+        mse = torch.mean((img1_norm - img2_norm) ** 2)
 
     if mse == 0:
         return float('inf')
@@ -50,6 +58,41 @@ def calculate_ssim(img1, img2):
     img1_norm = denormalize(img1).clamp(0.0, 1.0)
     img2_norm = denormalize(img2).clamp(0.0, 1.0)
     return structural_similarity_index_measure(img1_norm, img2_norm, data_range=1.0)
+
+def energia_grade(residuo):
+    """
+    Fração (%) da energia do resíduo SR - HR nas frequências múltiplas de
+    1/4 ciclo/px — os períodos de 2 e 4 px do padrão em grade visto no job
+    1879476 (ver docs/diagnostico_1879476.md §3). Janela 3x3 em torno de cada
+    pico; o DC fica de fora.
+
+    O PISO (resíduo sem estrutura periódica, espectro plano) depende do
+    tamanho: a máscara cobre 135 das H x W frequências, então 135/(H*W) —
+    0,2% em 256 px (o caso da validação e do diagnóstico, onde a grade do job
+    1879476 deu ~20%), 3,3% em 64 px, ~0 numa fatia inteira. Comparar só
+    medidas feitas no mesmo tamanho. Ver piso_grade().
+    É a mesma medida de scripts/diagnostico_1879476.py.
+
+    residuo: (B, 1, H, W), qualquer domínio. Devolve a fração média do lote.
+    """
+    r = residuo.float().squeeze(1)
+    r = r - r.mean(dim=(-2, -1), keepdim=True)
+    espectro = torch.fft.fft2(r).abs() ** 2
+    h, w = r.shape[-2:]
+    mascara = torch.zeros(h, w, dtype=torch.bool, device=r.device)
+    for fy in (0, .25, .5, .75):
+        for fx in (0, .25, .5, .75):
+            if fy == fx == 0:
+                continue
+            for a in (-1, 0, 1):
+                for b in (-1, 0, 1):
+                    mascara[(int(fy * h) + a) % h, (int(fx * w) + b) % w] = True
+    total = espectro.sum(dim=(-2, -1)).clamp_min(1e-30)
+    return (100 * espectro[:, mascara].sum(dim=-1) / total).mean().item()
+
+def piso_grade(h, w):
+    """Valor de energia_grade (%) para um resíduo de espectro plano H x W."""
+    return 100 * 135 / (h * w)
 
 def unwrap(model):
     """
@@ -95,7 +138,7 @@ def save_model_weights(generator, discriminator, epoch, save_dir="weights"):
     torch.save(unwrap(discriminator).state_dict(), os.path.join(save_dir, f"disc_epoch_{epoch}.pth"))
 
 def save_checkpoint(path, epoch, generator, discriminator, optimizer_G, optimizer_D,
-                    arquitetura=None, scalers=None, schedulers=None):
+                    arquitetura=None, scalers=None, schedulers=None, extra=None):
     """
     Salva um checkpoint COMPLETO e retomável do treinamento: modelos, otimizadores,
     época atual e estado dos geradores de números aleatórios (RNG). Diferente de
@@ -105,6 +148,9 @@ def save_checkpoint(path, epoch, generator, discriminator, optimizer_G, optimize
     'arquitetura' guarda as escolhas que mudam o modelo ou o objetivo
     (variante do Discriminador, camada da VGG) para que load_checkpoint possa
     recusar uma retomada incompatível com uma mensagem útil.
+
+    'extra' é um dicionário livre de estado do laço de treino que precisa
+    sobreviver à retomada (ex.: o melhor val_psnr até aqui, para o best.pth).
     """
     save_dir = os.path.dirname(path)
     if save_dir and not os.path.exists(save_dir):
@@ -123,6 +169,7 @@ def save_checkpoint(path, epoch, generator, discriminator, optimizer_G, optimize
                     if scalers else None),
         "schedulers": ({k: s.state_dict() for k, s in schedulers.items()}
                        if schedulers else None),
+        "extra": extra,
         "rng": {
             "torch": torch.get_rng_state(),
             "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
@@ -138,11 +185,14 @@ def save_checkpoint(path, epoch, generator, discriminator, optimizer_G, optimize
     os.replace(tmp, path)
 
 def load_checkpoint(path, generator, discriminator, optimizer_G, optimizer_D, device,
-                    arquitetura=None, scalers=None, schedulers=None):
+                    arquitetura=None, scalers=None, schedulers=None, extra=None):
     """
     Restaura um checkpoint salvo por save_checkpoint e retorna a época em que
     o treino deve recomeçar (época salva + 1). Também restaura o estado dos RNGs
     para reprodutibilidade da sequência de dados/augmentation.
+
+    Se 'extra' for um dicionário, é preenchido no lugar com o 'extra' gravado
+    (checkpoints antigos, sem ele, deixam o dicionário como está).
     """
     # weights_only=False é necessário pois o checkpoint contém estados de RNG (numpy/python)
     state = torch.load(path, map_location=device, weights_only=False)
@@ -184,6 +234,9 @@ def load_checkpoint(path, generator, discriminator, optimizer_G, optimizer_D, de
             if k in agendados and agendados[k] is not None:
                 s.load_state_dict(agendados[k])
 
+    if extra is not None and state.get("extra"):
+        extra.update(state["extra"])
+
     rng = state.get("rng")
     if rng is not None:
         torch.set_rng_state(rng["torch"].cpu() if hasattr(rng["torch"], "cpu") else rng["torch"])
@@ -211,7 +264,46 @@ def _git_revision():
                                        stderr=subprocess.DEVNULL, text=True).strip()
         return rev + ("-sujo" if sujo else "")
     except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        pass
+    # Fora de um clone: o 'git archive' substitui o marcador de src/_versao.py
+    # pelo commit (atributo export-subst em .gitattributes). Uma cópia feita de
+    # outro jeito deixa o marcador intacto, e aí não há commit a registrar.
+    try:
+        from src._versao import COMMIT
+    except ImportError:
         return None
+    return None if COMMIT.startswith("$Format") else COMMIT + "-archive"
+
+def _hash_codigo():
+    """
+    SHA-256 de cada .py de src/ e scripts/. Vale mesmo sem git: dois
+    config.json com os mesmos hashes rodaram o mesmo código, e o hash de um
+    arquivo do repositório pode ser conferido depois com sha256sum.
+    """
+    import hashlib
+    raiz = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    hashes = {}
+    for pasta in ("src", "scripts"):
+        caminho = os.path.join(raiz, pasta)
+        if not os.path.isdir(caminho):
+            continue
+        for nome in sorted(os.listdir(caminho)):
+            if nome.endswith((".py", ".sh", ".slurm")):
+                with open(os.path.join(caminho, nome), "rb") as f:
+                    hashes[f"{pasta}/{nome}"] = hashlib.sha256(f.read()).hexdigest()
+    return hashes
+
+def _versoes_pacotes():
+    """Versão instalada de cada dependência direta (requirements.txt)."""
+    from importlib import metadata
+    versoes = {}
+    for pacote in ("torch", "torchvision", "torchmetrics", "numpy", "pillow",
+                   "tifffile", "astropy"):
+        try:
+            versoes[pacote] = metadata.version(pacote)
+        except metadata.PackageNotFoundError:
+            versoes[pacote] = None
+    return versoes
 
 def save_run_config(path, args):
     """
@@ -226,9 +318,23 @@ def save_run_config(path, args):
     if save_dir and not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
+    commit = _git_revision()
+    if commit is None:
+        # O job 1879476 rodou assim (git_commit null) sem que ninguém notasse.
+        print("=" * 72 + "\n"
+              "AVISO: o código NÃO veio de um clone git nem de um 'git archive'.\n"
+              "O config.json não terá commit; a procedência fica só nos hashes\n"
+              "SHA-256 dos arquivos (campo 'codigo_sha256'). Para a próxima vez,\n"
+              "envie o código com: git archive --format=zip -o codigo.zip HEAD\n"
+              + "=" * 72, flush=True)
+    elif commit.endswith("-sujo"):
+        print(f"AVISO: há alterações não commitadas no código ({commit}).", flush=True)
+
     info = {
         "datahora": datetime.now().astimezone().isoformat(timespec="seconds"),
-        "git_commit": _git_revision(),
+        "git_commit": commit,
+        "codigo_sha256": _hash_codigo(),
+        "semente": getattr(args, "seed", None),
         "argumentos": vars(args),
         "ambiente": {
             "host": platform.node(),
@@ -239,6 +345,7 @@ def save_run_config(path, args):
             "gpu": (torch.cuda.get_device_name(0)
                     if torch.cuda.is_available() else None),
             "n_gpus": torch.cuda.device_count(),
+            "pacotes": _versoes_pacotes(),
         },
         "slurm": {k: v for k, v in os.environ.items() if k.startswith("SLURM_")} or None,
     }
