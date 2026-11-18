@@ -184,6 +184,13 @@ inteiro.
 
 ## 7. Próxima rodada (confirmada em 16/11/2026, V3 trocado em 18/11/2026 após os mini-ensaios da §10; implementada em `scripts/rodada_variantes.sh`)
 
+**Estado (18/11/2026):** código pronto e testado no commit `4cff8ec`, empacotado
+em `aprimoramento-imagens-neutrons_4cff8ec.zip` (via `git archive`, então o
+`config.json` da rodada vai registrar esse commit). **Envio ao cluster
+pendente.** Ao receber os resultados, confira em
+`runs/<job>/V0_srresnet/logs/config.json` que `git_commit` é
+`4cff8ec0ffc08322513d8585b8e1e9f6aa7a17ec-archive`.
+
 Um único job de 24 h, em duas partes.
 
 **Parte 1 — SRResNet (V0).** Treina o gerador só com MSE, como no pré-treino,
@@ -306,11 +313,11 @@ e corrigiram dois bugs que teriam derrubado o job:
 
 | item | por que não | risco e mitigação |
 |---|---|---|
-| Caminho com GPU e precisão mista (`--amp`): autocast float16, GradScaler, normalização espectral sob autocast | não há GPU aqui; em CPU o `--amp` é ignorado | médio. O caminho AMP já rodou 100 épocas no job 1879476; o novo é o `patch_sn` sob autocast. Se ele falhar, só a fase V3 cai, e a avaliação segue com as outras |
+| Precisão mista (`--amp`) **na GPU**: autocast float16 e GradScaler em CUDA | não há GPU aqui | baixo. O `train.py` real rodou em CPU com float16 forçado, com os dois D, sem erro nem NaN (§10, verificação 1), e o caminho AMP já rodou 100 épocas no job 1879476. Os kernels de CUDA em si não foram exercitados. Se uma fase falhar, a rodada segue para as outras e para a avaliação |
 | Tempo por época e pico de memória na A30 | sem GPU | baixo para memória: o `patch_sn` (2,8 M parâmetros) é menor que o `artigo`. O tempo é desconhecido; a divisão pelo relógio se adapta, e o log passa a registrar os dois |
 | Primeira época mais longa que o orçamento da fase | depende da velocidade real | a primeira época de cada fase sempre roda (ainda não há estimativa). Com épocas ~1/5 das do job 1879476 (≤ ~3 min), é improvável. O aviso de walltime 45 min antes do fim cobre o pior caso |
 | Avaliação final em fatias inteiras (~2028 px), 203 fatias × 7 geradores | sem as 203 fatias nem a GPU | rodada em 1 fatia real inteira em CPU (§10): pico de 3,3 GB de RAM; a parte em CPU custa ~7 s/fatia, ~25 min nas 203. Com a inferência na GPU, estimativa de 35–40 min, com 90 min reservados |
-| Recortes de validação fixos com `--num-workers > 0` | os testes usam 0 workers | baixo: o sorteio depende só do índice e é refeito dentro de cada worker |
+| Recortes de validação fixos com `--num-workers > 0` | **testado** depois: a verificação 2 da §10 rodou com 2 workers | — |
 | Ambiente do Coaraci: `module load`, o venv de quem roda, `sbcast`, entrega do `USR1` pelo SLURM, localidade do nó | só existem lá | o `.slurm` foi testado inteiro com `module` simulado e sem `sbcast` (cai no `cp`). O venv do cluster precisa ter as versões do `requirements.txt`; o job grava `pip_freeze.txt` para conferir |
 | Build CUDA do torch 2.6.0 | testado só o build de CPU da mesma versão | baixo: mesma API |
 | `git archive` com o código real | o código novo ainda não foi commitado | testado num repositório temporário. O commit precisa incluir `.gitattributes` e `src/_versao.py` |
