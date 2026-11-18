@@ -262,9 +262,10 @@ def peso_adv_adaptativo(gen_hr, imgs_hr, discriminator, feature_extractor, args)
     """
     x = gen_hr[:2].detach().float().requires_grad_(True)
     alvo = imgs_hr[:2].float()
-    conteudo = (args.content_weight * nn.functional.mse_loss(
-                    feature_extractor(denormalize(x)), feature_extractor(denormalize(alvo)))
-                + args.pixel_weight * nn.functional.mse_loss(x, alvo))
+    conteudo = args.pixel_weight * nn.functional.mse_loss(x, alvo)
+    if args.content_weight > 0:
+        conteudo = conteudo + args.content_weight * nn.functional.mse_loss(
+            feature_extractor(denormalize(x)), feature_extractor(denormalize(alvo)))
     g_cont, = torch.autograd.grad(conteudo, x)
     discriminator.eval()   # sem mexer na BatchNorm nem na norma espectral
     pred = discriminator(x)
@@ -289,8 +290,9 @@ def normas_gradiente(gen_hr, imgs_hr, discriminator, feature_extractor, args, us
     x = gen_hr[:2].detach().float().requires_grad_(True)
     alvo = imgs_hr[:2].float()
     termos = {"grad_pixel": args.pixel_weight * nn.functional.mse_loss(x, alvo)}
-    termos["grad_vgg"] = args.content_weight * nn.functional.mse_loss(
-        feature_extractor(denormalize(x)), feature_extractor(denormalize(alvo)))
+    if args.content_weight > 0:
+        termos["grad_vgg"] = args.content_weight * nn.functional.mse_loss(
+            feature_extractor(denormalize(x)), feature_extractor(denormalize(alvo)))
     if usar_D:
         # Em eval: em modo de treino esta chamada atualizaria as estatísticas
         # da BatchNorm (compacto) e a iteração da norma espectral (patch_sn)
@@ -302,8 +304,10 @@ def normas_gradiente(gen_hr, imgs_hr, discriminator, feature_extractor, args, us
             pred, torch.full_like(pred, 0.9))
     # autograd.grad devolve só o gradiente em x e não toca nos .grad dos
     # parâmetros: o passo de otimização não é afetado
-    return {nome: torch.autograd.grad(termo, x, retain_graph=True)[0].norm().item()
-            for nome, termo in termos.items()}
+    normas = {nome: torch.autograd.grad(termo, x, retain_graph=True)[0].norm().item()
+              for nome, termo in termos.items()}
+    normas.setdefault("grad_vgg", 0.0)   # peso 0: a VGG não puxa nada
+    return normas
 
 def validate_step_edges(generator, loader, device, epoch, log_path="logs/step_edge_mtf.csv"):
     """
@@ -639,9 +643,14 @@ def train(args):
                     # Content Loss: Compara as características da VGG da imagem gerada vs real.
                     # CORREÇÃO: a VGG espera entrada em [0, 1] (estatísticas ImageNet),
                     # mas gen_hr/imgs_hr estão em [-1, 1] — denormalize antes de extrair
-                    gen_features = feature_extractor(denormalize(gen_hr))
-                    real_features = feature_extractor(denormalize(imgs_hr))
-                    loss_content = criterion_content(gen_features, real_features.detach())
+                    # Com --content-weight 0 (ex.: SRGAN-MSE, sem VGG) a VGG nem é
+                    # avaliada: ela é a parte mais cara do passo do Gerador
+                    if args.content_weight > 0:
+                        gen_features = feature_extractor(denormalize(gen_hr))
+                        real_features = feature_extractor(denormalize(imgs_hr))
+                        loss_content = criterion_content(gen_features, real_features.detach())
+                    else:
+                        loss_content = torch.zeros((), device=device)
 
                     # Perda Total do Gerador. Com Adam só a RAZÃO entre os pesos
                     # importa, não a escala absoluta. No job 1879476 (VGG 1.0,

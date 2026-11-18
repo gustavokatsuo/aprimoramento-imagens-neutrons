@@ -101,6 +101,7 @@ aprimoramento-imagens-neutrons/
 │   ├── gerar_phantoms.py       # Phantoms de borda SINTÉTICOS para a MTF
 │   ├── diagnostico_1879476.py  # Medidas do diagnóstico do job 1879476
 │   ├── rodada_variantes.sh     # SRResNet + variantes GAN + avaliação, num job
+│   ├── verificacao/            # Ensaios e checagens antes de enviar ao cluster
 │   └── train_coaraci.slurm     # Submissão no cluster Coaraci
 ├── tests/
 │   └── test_rodada_cpu.py      # Testes em CPU da rodada inteira
@@ -237,7 +238,7 @@ sbatch scripts/train_coaraci.slurm
 
 O script copia os dados para o scratch do nó, gera phantoms de borda sintéticos se não vierem phantoms com os dados, roda a **rodada de variantes** (`scripts/rodada_variantes.sh`) e traz tudo de volta para `runs/$SLURM_JOB_ID` — inclusive se o job for interrompido por walltime.
 
-A rodada treina, num único job, uma SRResNet (`V0_srresnet`) e três receitas de fase GAN partindo dela (`V1_perceptual`, `V2_adv_forte`, `V3_patch_sn`), dividindo o tempo pelo relógio, e termina com a comparação automática contra bicúbica, Lanczos e unsharp masking no bloco de teste (`runs/<job>/avaliacao/relatorio_final.txt`). Por que essas variantes: `docs/diagnostico_1879476.md`. A mesma rodada roda localmente, em escala reduzida, com `scripts/rodada_variantes.sh <dados> <bordas> <saída>` (variáveis de ambiente no cabeçalho do script).
+A rodada treina, num único job, uma SRResNet (`V0_srresnet`) e três receitas de fase GAN partindo dela (`V1_perceptual`, `V2_adv_forte`, `V3_srgan_mse`) — uma grade 2×2 de VGG sim/não × adversarial sim/não, dividindo o tempo pelo relógio, e termina com a comparação automática contra bicúbica, Lanczos e unsharp masking no bloco de teste (`runs/<job>/avaliacao/relatorio_final.txt`). Por que essas variantes: `docs/diagnostico_1879476.md`. A mesma rodada roda localmente, em escala reduzida, com `scripts/rodada_variantes.sh <dados> <bordas> <saída>` (variáveis de ambiente no cabeçalho do script).
 
 Cada treino grava, além do CSV por época (agora com tempo por época, pico de memória, energia de grade e a força de cada termo da perda), `weights/best.pth` (melhor `val_psnr`, avaliado a cada época sobre recortes de validação fixos), `weights/gen_ultimo.pth` e `logs/resumo.json`.
 
@@ -255,7 +256,7 @@ venv/bin/python -c "from torchvision.models import vgg19, VGG19_Weights; vgg19(w
 mkdir -p logs
 ```
 
-O script confere GPU, pesos da VGG e raiz do repositório antes de copiar os dados, e falha em segundos se algo faltar. A saída do job vai para `logs/slurm_<job>.out`. Por padrão usa 4 workers com cache de 200 fatias (~26 GiB de RAM somando treino e validação); ajuste com `--export=ALL,WORKERS=2,CACHE=500`. As fases de treino terminam ~60 min antes do walltime para dar lugar à avaliação final; como rede de segurança, 45 min antes do fim o SLURM avisa o script (`--signal=B:USR1@2700`), que interrompe o treino em andamento e segue para a avaliação.
+O script confere GPU, pesos da VGG e raiz do repositório antes de copiar os dados, e falha em segundos se algo faltar. A saída do job vai para `logs/slurm_<job>.out`. Por padrão usa 4 workers com cache de 200 fatias (~26 GiB de RAM somando treino e validação); ajuste com `--export=ALL,WORKERS=2,CACHE=500`. As fases de treino terminam ~90 min antes do walltime para dar lugar à avaliação final; como rede de segurança, 45 min antes do fim o SLURM avisa o script (`--signal=B:USR1@2700`), que interrompe o treino em andamento e segue para a avaliação.
 
 **Procedência.** O `config.json` de cada treino registra o commit e o SHA-256 de cada arquivo de código. Se o código for levado ao cluster sem `git clone`, gere o pacote com `git archive --format=zip -o codigo.zip HEAD`: o commit fica gravado em `src/_versao.py`. Sem nenhum dos dois, o job avisa em destaque que não há commit.
 

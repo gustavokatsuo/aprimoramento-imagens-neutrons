@@ -331,20 +331,24 @@ class TestRodada(Base):
         self.assertEqual(rc, 0, out[-4000:])
         with open(os.path.join(saida, "estado_fases.txt")) as f:
             estado = f.read()
-        for fase in ("V0_srresnet", "V1_perceptual", "V2_adv_forte", "V3_patch_sn"):
+        for fase in ("V0_srresnet", "V1_perceptual", "V2_adv_forte", "V3_srgan_mse"):
             self.assertIn(f"{fase}: código 0", estado)
             self.assertTrue(os.path.isfile(os.path.join(saida, fase, "weights", "best.pth")), fase)
         # V1-V3 partiram do best.pth do V0
-        for fase in ("V1_perceptual", "V2_adv_forte", "V3_patch_sn"):
+        for fase in ("V1_perceptual", "V2_adv_forte", "V3_srgan_mse"):
             with open(os.path.join(saida, fase, "logs", "config.json")) as f:
                 cfg = json.load(f)["argumentos"]
             self.assertTrue(cfg["init_generator"].endswith("V0_srresnet/weights/best.pth"))
-        self.assertEqual(json.load(open(os.path.join(saida, "V3_patch_sn", "logs",
-                                                     "config.json")))["argumentos"]["adv_razao"], 0.5)
+        # V3 sem VGG (o 0 prevalece sobre o 0,006 comum) e com o D compacto
+        v3 = json.load(open(os.path.join(saida, "V3_srgan_mse", "logs", "config.json")))["argumentos"]
+        self.assertEqual((v3["content_weight"], v3["discriminator"], v3["adv_weight"]),
+                         (0.0, "compacto", 1e-3))
+        self.assertEqual(linhas_csv(os.path.join(saida, "V3_srgan_mse"))[0]["loss_content_vgg"],
+                         "0.000000")
         with open(os.path.join(saida, "avaliacao", "relatorio_final.txt")) as f:
             rel = f.read()
         for linha in ("bicubic", "lanczos", "bicubic+unsharp", "V0_srresnet ", "V1_perceptual ",
-                      "V2_adv_forte ", "V3_patch_sn ", "V3_patch_sn_ultimo", "MTF10",
+                      "V2_adv_forte ", "V3_srgan_mse ", "V3_srgan_mse_ultimo", "MTF10",
                       "DEGRADAÇÃO SINTÉTICA", "PSNR fov", "Avaliação terminou com código 0"):
             self.assertIn(linha, rel)
         self.assertTrue(os.path.isfile(os.path.join(saida, "avaliacao", "teste.csv")))
@@ -359,7 +363,7 @@ class TestRodada(Base):
         with open(os.path.join(saida, "estado_fases.txt")) as f:
             estado = f.read()
         self.assertIn("V2_adv_forte: pulada (interrupção)", estado)
-        self.assertIn("V3_patch_sn: pulada (interrupção)", estado)
+        self.assertIn("V3_srgan_mse: pulada (interrupção)", estado)
         with open(os.path.join(saida, "avaliacao", "relatorio_final.txt")) as f:
             rel = f.read()
         self.assertIn("V0_srresnet ", rel)
@@ -397,7 +401,7 @@ class TestSlurm(Base):
         self.assertIn("gerando os sintéticos", out)
         self.assertIn("NÃO veio de um clone git", out)
         res = os.path.join(proj, "runs", job)
-        for item in ("V0_srresnet/weights/best.pth", "V3_patch_sn/weights/best.pth",
+        for item in ("V0_srresnet/weights/best.pth", "V3_srgan_mse/weights/best.pth",
                      "avaliacao/relatorio_final.txt", "ambiente/pip_freeze.txt",
                      "estado_fases.txt"):
             self.assertTrue(os.path.exists(os.path.join(res, item)), item)

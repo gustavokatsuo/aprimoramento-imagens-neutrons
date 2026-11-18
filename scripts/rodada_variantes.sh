@@ -12,10 +12,15 @@
 #   V2_adv_forte   V1 + discriminador 'compacto' com adversarial x1e-3. Com a
 #                  VGG em 0,006, é a razão adversarial/conteúdo do artigo, ~170x
 #                  o peso relativo que o adversarial teve no job 1879476.
-#   V3_patch_sn    como V2, com discriminador local 'patch_sn' (PatchGAN +
-#                  normalização espectral, sem BatchNorm) e peso adversarial
-#                  ADAPTATIVO (--adv-razao 0.5): a norma espectral limita o
-#                  gradiente do D, e o peso fixo do V2 o deixaria abafado.
+#   V3_srgan_mse   parte de V0: MSE de pixel x1 + adversarial x1e-3 com o D
+#                  'compacto', SEM VGG. É o "SRGAN-MSE" de Ledig et al. (2017).
+#
+# As quatro formam uma grade 2x2 (VGG sim/não x adversarial sim/não), com o
+# mesmo D e o mesmo peso adversarial: V1 x V2 isola o adversarial; V2 x V3
+# isola a VGG. A escolha veio de dois mini-ensaios em CPU com dados reais
+# (docs/diagnostico_1879476.md §10), que descartaram o D 'patch_sn' com peso
+# adaptativo, a variante V3 original: o D não aprendeu a separar real de falso
+# e o peso preso no teto empurrou o Gerador com ruído.
 #
 # Todas com a mesma semente; V1-V3 partem do MESMO best.pth de V0 com
 # otimizadores novos. Ao fim, src.classical_baselines compara todos os
@@ -34,7 +39,8 @@
 # Variáveis de ambiente (todas opcionais):
 #   PRAZO_FINAL   instante final, em segundos desde 1970 (padrão:
 #                 SLURM_JOB_END_TIME; sem ele, agora + 24 h)
-#   RESERVA_MIN   minutos reservados para a avaliação final (padrão 60)
+#   RESERVA_MIN   minutos reservados para a avaliação final (padrão 90; a
+#                 estimativa para as 203 fatias de teste é de 35-40 min)
 #   FRACAO_V0     fração do tempo de treino para V0 (padrão 0.25)
 #   WORKERS, CACHE  workers e cache do DataLoader (padrão 4 e 200)
 #   PYTHON        interpretador (padrão: python)
@@ -62,9 +68,9 @@ DADOS="$1"; BORDAS="$2"; SAIDA="$3"
 PYTHON="${PYTHON:-python}"
 WORKERS="${WORKERS:-4}"
 CACHE="${CACHE:-200}"
-RESERVA_MIN="${RESERVA_MIN:-60}"
+RESERVA_MIN="${RESERVA_MIN:-90}"
 FRACAO_V0="${FRACAO_V0:-0.25}"
-FASES="${FASES:-V0_srresnet V1_perceptual V2_adv_forte V3_patch_sn}"
+FASES="${FASES:-V0_srresnet V1_perceptual V2_adv_forte V3_srgan_mse}"
 read -r -a EXTRA_T <<< "${EXTRA_TREINO:-}"
 read -r -a EXTRA_A <<< "${EXTRA_AVAL:-}"
 
@@ -142,11 +148,8 @@ args_da_fase() {
         V0_srresnet)   echo "--pretrain-epochs 100000" ;;
         V1_perceptual) echo "${GAN[*]} --adv-weight 0" ;;
         V2_adv_forte)  echo "${GAN[*]} --adv-weight 1e-3 --discriminator compacto" ;;
-        # patch_sn: peso ADAPTATIVO. A norma espectral limita o gradiente do D
-        # e um peso fixo deixaria o adversarial abafado (calibrar-adv mediu
-        # razão adv/VGG de 0,003 com 1e-3). 0,5 é a razão que o D compacto
-        # treinado do job 1879476 tinha com 1e-3, ou seja, o regime do V2.
-        V3_patch_sn)   echo "${GAN[*]} --adv-weight 1e-3 --adv-razao 0.5 --discriminator patch_sn" ;;
+        # Sem VGG: o --content-weight 0 vem DEPOIS do 0,006 de GAN e prevalece
+        V3_srgan_mse)  echo "${GAN[*]} --content-weight 0 --adv-weight 1e-3 --discriminator compacto" ;;
         *) return 1 ;;
     esac
 }

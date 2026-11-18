@@ -30,7 +30,7 @@
 #SBATCH --time=24:00:00
 # Aviso 45 min antes do walltime: a rodada interrompe o treino em andamento e
 # ainda tem tempo de fazer a avaliação final. Normalmente não dispara: as fases
-# já terminam ~60 min antes do fim (RESERVA_MIN em rodada_variantes.sh).
+# já terminam ~90 min antes do fim (RESERVA_MIN em rodada_variantes.sh).
 #SBATCH --signal=B:USR1@2700
 #SBATCH --output=logs/slurm_%j.out
 #SBATCH --error=logs/slurm_%j.err

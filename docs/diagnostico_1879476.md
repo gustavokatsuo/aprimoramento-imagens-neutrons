@@ -182,7 +182,7 @@ inteiro.
 
 ---
 
-## 7. Próxima rodada (confirmada em 16/11/2026; implementada em `scripts/rodada_variantes.sh`)
+## 7. Próxima rodada (confirmada em 16/11/2026, V3 trocado em 18/11/2026 após os mini-ensaios da §10; implementada em `scripts/rodada_variantes.sh`)
 
 Um único job de 24 h, em duas partes.
 
@@ -199,11 +199,21 @@ diferença entre elas é a receita, e cada uma responde a uma pergunta:
 |---|---|---|
 | **V1 perceptual** | MSE de pixel + VGG; **sem** discriminador | O que a perda VGG sozinha faz, com âncora de pixel? É a referência para saber se o GAN acrescenta algo. |
 | **V2 adv-forte** | V1 + discriminador atual (`compacto`), adversarial ×1e-3 fixo | A hipótese principal: dar ao D, que já empurra contra a grade, peso suficiente para agir. |
-| **V3 patch-SN** | discriminador **local** (PatchGAN), com normalização espectral e sem BatchNorm; peso adversarial **adaptativo** (`--adv-razao 0.5`) | Um D que julga textura por região e não tem os atalhos da BatchNorm fica em equilíbrio por mais tempo? |
+| **V3 SRGAN-MSE** | MSE de pixel + discriminador `compacto` ×1e-3, **sem** VGG (o "SRGAN-MSE" de Ledig et al., 2017) | O adversarial acrescenta nitidez sem a fonte comprovada da grade, que é a VGG? |
 
-Comum a V1–V3 (correções, não hipóteses): Adam novo na transição; perda de
-conteúdo = MSE de pixel ×1 + VGG relu3_4 ×0,006; log por época de tempo,
-memória, norma do gradiente de cada termo e energia de grade no val.
+As quatro formam uma grade 2×2, com o mesmo D e o mesmo peso adversarial:
+
+| | sem adversarial | com adversarial |
+|---|---|---|
+| **sem VGG** | V0 SRResNet | V3 SRGAN-MSE |
+| **com VGG** | V1 perceptual | V2 adv-forte |
+
+V1 × V2 isola o efeito do adversarial; V2 × V3, o da VGG; V0 × os demais, o
+que cada perda acrescenta à SRResNet.
+
+Comum a V1–V3 (correções, não hipóteses): Adam novo na transição; MSE de
+pixel ×1 (VGG relu3_4 ×0,006 em V1 e V2); log por época de tempo, memória,
+norma do gradiente de cada termo e energia de grade no val.
 
 **Por que 1e-3 no V2.** Com a VGG reescalada para 0,006, o peso 1e-3 é a razão
 adversarial/conteúdo do artigo, ~170× o peso relativo do job 1879476.
@@ -212,7 +222,8 @@ Calibração `[medido]` (`diagnostico_1879476.py calibrar-adv`: cada D treinado
 adversarial/VGG de ~1,1. Com o D treinado do job 1879476 a razão era ~0,5
 (seção 4). O peso fixo cai, portanto, numa faixa razoável.
 
-**Por que adaptativo no V3.** No mesmo teste, o `patch_sn` dá razão de só
+**A V3 original (descartada).** Era um discriminador `patch_sn` (PatchGAN com
+normalização espectral) com peso adaptativo. No mesmo teste de calibração, o `patch_sn` dá razão de só
 **0,003** com 1e-3, e a escala ainda subia ~30× em 200 passos. A normalização
 espectral limita o gradiente do D em relação à imagem por construção. Com
 peso fixo, o V3 repetiria a falha do job 1879476 (adversarial abafado), e
@@ -223,16 +234,17 @@ treinado tinha, isto é, o regime do V2. O peso fica limitado a [1e-6, 1]
 para que um D ainda sem sinal não receba peso ilimitado. O log registra o
 peso efetivo por época (`adv_weight_efetivo`).
 
-**Consequência a declarar:** V2 e V3 diferem em duas coisas (o D e o modo do
-peso). A comparação entre eles diz qual *receita* funciona melhor, não isola
-o efeito do discriminador. Ver decisão A9 em `decisoes.md`.
+No mini-ensaio com dados reais (§10), porém, o `patch_sn` não aprendeu a
+separar real de falso, e o peso preso no teto empurrou o Gerador com ruído.
+Ele foi substituído pelo SRGAN-MSE. O código (`--discriminator patch_sn`,
+`--adv-razao`) continua no repositório, sem uso na rodada.
 
 **Detalhes da execução.** Época de 20 recortes por fatia (~1/5 da época do
 job 1879476), para que o `best.pth` e o corte pelo orçamento tenham
 granularidade fina. Taxa de aprendizado constante 1e-4: com o tempo dividido
 pelo relógio, as épocas de decaimento não são conhecidas de antemão. Recortes
 de validação fixos por índice, para que o `val_psnr` não oscile pelo sorteio.
-Divisão do tempo: o prazo do job menos 60 min de reserva para a avaliação; V0
+Divisão do tempo: o prazo do job menos 90 min de reserva para a avaliação; V0
 recebe 1/4, e cada fase seguinte recebe o que resta dividido pelas fases que
 faltam. Avaliação final na fatia inteira (`--patch-size 0`) de cada imagem do
 bloco de teste, com PSNR no recorte inteiro e dentro do círculo de
@@ -297,9 +309,92 @@ e corrigiram dois bugs que teriam derrubado o job:
 | Caminho com GPU e precisão mista (`--amp`): autocast float16, GradScaler, normalização espectral sob autocast | não há GPU aqui; em CPU o `--amp` é ignorado | médio. O caminho AMP já rodou 100 épocas no job 1879476; o novo é o `patch_sn` sob autocast. Se ele falhar, só a fase V3 cai, e a avaliação segue com as outras |
 | Tempo por época e pico de memória na A30 | sem GPU | baixo para memória: o `patch_sn` (2,8 M parâmetros) é menor que o `artigo`. O tempo é desconhecido; a divisão pelo relógio se adapta, e o log passa a registrar os dois |
 | Primeira época mais longa que o orçamento da fase | depende da velocidade real | a primeira época de cada fase sempre roda (ainda não há estimativa). Com épocas ~1/5 das do job 1879476 (≤ ~3 min), é improvável. O aviso de walltime 45 min antes do fim cobre o pior caso |
-| Avaliação final em fatias inteiras (~2028 px), 203 fatias × 7 geradores | sem os dados nem a GPU | tempo estimado de 10–20 min, com 60 min reservados. Memória da inferência estimada em ~3–4 GB |
+| Avaliação final em fatias inteiras (~2028 px), 203 fatias × 7 geradores | sem as 203 fatias nem a GPU | rodada em 1 fatia real inteira em CPU (§10): pico de 3,3 GB de RAM; a parte em CPU custa ~7 s/fatia, ~25 min nas 203. Com a inferência na GPU, estimativa de 35–40 min, com 90 min reservados |
 | Recortes de validação fixos com `--num-workers > 0` | os testes usam 0 workers | baixo: o sorteio depende só do índice e é refeito dentro de cada worker |
 | Ambiente do Coaraci: `module load`, o venv de quem roda, `sbcast`, entrega do `USR1` pelo SLURM, localidade do nó | só existem lá | o `.slurm` foi testado inteiro com `module` simulado e sem `sbcast` (cai no `cp`). O venv do cluster precisa ter as versões do `requirements.txt`; o job grava `pip_freeze.txt` para conferir |
 | Build CUDA do torch 2.6.0 | testado só o build de CPU da mesma versão | baixo: mesma API |
 | `git archive` com o código real | o código novo ainda não foi commitado | testado num repositório temporário. O commit precisa incluir `.gitattributes` e `src/_versao.py` |
 | **Resultado científico**: se V2/V3 evitam a grade, se o D fica em equilíbrio, se o peso adaptativo se estabiliza | é exatamente o que a rodada mede | o log por época (`val_grade_pct`, `D_*_prob`, `grad_*`, `adv_weight_efetivo`) permite diagnosticar qualquer desfecho sem nova rodada de investigação |
+
+---
+
+## 10. Verificações finais antes de enviar (17–18/11/2026)
+
+Três verificações, todas na pilha exata do cluster (torch 2.6.0+cu124 e
+torchvision 0.21.0+cu124, rodando em CPU).
+
+**1. Precisão mista com os discriminadores.** O `train.py` real rodou com o
+autocast em float16 forçado em CPU (trocando só `usar_amp` e o `dtype` na
+memória). Épocas GAN completas com o D `compacto` e com o `patch_sn`, sem erro
+nem NaN `[medido]`.
+
+**2. Rodada inteira com dados reais.** `rodada_variantes.sh` nas 3 fatias
+reais (2048×2007), com 2 workers e avaliação na fatia inteira (2004×2004): as
+4 fases e a avaliação terminaram com código 0. Pico de RAM 3,3 GB. A parte da
+avaliação que roda em CPU (métricas, Lanczos) custa ~7 s por fatia, ~25 min
+nas 203 fatias de teste; por isso a reserva subiu de 60 para 90 min `[medido]`.
+
+**3. Mini-ensaios do algoritmo.** O `train.py` real, partindo do gerador da
+época 4 do job 1879476: treino nas fatias 2028–2029, validação na 2030,
+recortes de 128 px, lote 8, 25 épocas de ~12 passos (~300 passos). O controle
+reproduz a falha do job 1879476, então o ensaio tem poder de detectá-la
+`[medido]`:
+
+| receita | PSNR val | SSIM | grade (% / amplitude) | D_real / D_fake |
+|---|---|---|---|---|
+| controle (receita do job 1879476) | 32,4 dB | 0,878 | 15,9% / 9,6 ‰ | 0,89 / 0,01 |
+| V1 perceptual | 35,8 dB | 0,897 | 15,0% / 6,4 ‰ | — |
+| V2 adv-forte | 35,9 dB | 0,897 | 13,8% / 6,1 ‰ | 0,56 / 0,34 |
+| V3 original (`patch_sn`, peso adaptativo) | 35,7 dB | 0,882 | 22,4% / 7,5 ‰ | 0,45 / 0,45 |
+| candidata (a): sem VGG (SRGAN-MSE) | 34,8 dB | 0,905 | 8,2% / 4,9 ‰ | 0,46 / 0,45 |
+| candidata (b): PatchGAN sem norma espectral | 36,5 dB | 0,902 | 11,1% / 4,9 ‰ | 0,46 / 0,44 |
+
+Médias das 5 últimas épocas. Piso da grade em 128 px: 0,82%. A SRResNet (época
+4) tem ~0,8 ‰.
+
+**O que se conclui:**
+
+- **O V2 resolve o desequilíbrio.** O D compacto aprende sem colapsar, e a força
+  adversarial cresce até ~0,3 da força da VGG.
+- **A V3 original não funciona.** O `patch_sn` não aprendeu a separar real de
+  falso (D_real = D_fake o tempo todo). A diferença entre SR e HR é sutil, e a
+  normalização espectral limita quanto a saída do D pode variar. O peso
+  adaptativo ficou no teto de 1,0, empurrando o Gerador com ruído: a grade
+  chegou a 56–72% nas primeiras épocas. Foi substituída.
+- **A grade não some com nenhuma receita testada.** V1 e V2 ficam em ~6 ‰.
+  Sem VGG (a), a grade fica no piso na maior parte das épocas, mas dá picos de
+  ~20% (épocas 4 e 20). Então a VGG não é a única fonte. Hipótese
+  `[hipótese]`: o gradiente do próprio D tem estrutura de grade (54% da energia
+  nessas frequências no diagnóstico, §4), e mesmo com peso pequeno ele a
+  induz de vez em quando.
+- **Por que (a) e não (b).** Nenhuma venceu de forma clara em 300 passos, e em
+  nenhuma das duas o D chegou a aprender. A escolha é pelo desenho: com (a)
+  a rodada forma a grade 2×2 da §7, que isola o efeito de cada perda, e (a) é
+  uma variante do próprio artigo de Ledig et al.
+
+**Limitação:** 300 passos contra dezenas de milhares no job. O ensaio detecta
+falhas rápidas (a do job 1879476 aparece em 50 passos), mas não prevê o
+comportamento de longo prazo. **Expectativa para a rodada:** as variantes GAN
+provavelmente ainda terão alguma grade, menor que a do job 1879476. O
+resultado garantido é a SRResNet (V0) comparada com a bicúbica.
+
+**Como reproduzir esta seção.**
+
+```bash
+# ambiente igual ao do cluster (do PyPI vêm os builds cu124, que também rodam em CPU; ~2,5 GB)
+python3 -m venv venv26
+venv26/bin/pip install torch==2.6.0 torchvision==0.21.0 torchmetrics==1.9.0 \
+    numpy==2.4.4 pillow==12.2.0 tifffile==2026.3.3
+venv26/bin/python -m unittest tests.test_rodada_cpu -v                 # testes (§9)
+
+# 1. float16 forçado em CPU no train.py real (aqui com o D compacto)
+venv26/bin/python scripts/verificacao/amp_cpu.py "$PWD" --amp --discriminator compacto ...
+
+# 3. mini-ensaios (precisa do gen_epoch_4.pth de resultados_cluster.zip)
+PYTHON=venv26/bin/python scripts/verificacao/ensaio_receitas.sh \
+    ../resultados_cluster/1879476/weights/gen_epoch_4.pth ../ensaio_receitas
+```
+
+A verificação 2 é a própria `scripts/rodada_variantes.sh` apontada para as 3
+fatias reais, com `EXTRA_TREINO="--patch-size 256 --batch-size 2
+--patches-per-image 4 --val-fraction 0.34 --test-fraction 0.34 --split-gap 0"`.

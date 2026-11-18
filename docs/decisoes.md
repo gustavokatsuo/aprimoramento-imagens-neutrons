@@ -283,26 +283,22 @@ critério para os modelos GAN.
 **Implementado:** a rodada salva os dois, e a avaliação final inclui
 `<variante>` (best) e `<variante>_ultimo` para V1–V3.
 
-## A9. Peso adversarial fixo ou adaptativo
+## A9. Peso adversarial fixo ou adaptativo — **resolvida para esta rodada**
 
-**Estado atual (próxima rodada):** V2 com peso fixo 1e-3 (D `compacto`); V3
-com peso adaptativo, `--adv-razao 0.5` (D `patch_sn`).
+**Estado atual:** peso fixo 1e-3 com o D `compacto` em V2 e V3. O peso
+adaptativo (`--adv-razao`) e o D `patch_sn` ficam no código, sem uso.
 
-**Evidência `[medido]`** (`diagnostico_1879476.md` §7): com o mesmo peso 1e-3,
-o D `compacto` treinado puxa o Gerador com ~0,5–1,1× a força da VGG, e o
-`patch_sn` com ~0,003×. A normalização espectral limita o gradiente do D, e
-a escala dele muda ordens de grandeza durante o treino.
+**Evidência `[medido]`** (`diagnostico_1879476.md` §7 e §10): com 1e-3, o D
+`compacto` puxa o Gerador com ~0,3–1,1× a força da VGG e não colapsa num
+ensaio de 300 passos. O `patch_sn` não aprendeu a separar real de falso; com
+peso adaptativo, o peso ficou no teto e o Gerador foi empurrado por ruído
+(grade de até 72%).
 
-**Consequência:** V2 e V3 diferem no D **e** no modo do peso. A comparação
-entre eles indica a melhor receita, mas não isola o efeito do discriminador.
+**Consequência:** a confusão anterior (V2 e V3 diferindo no D e no modo do
+peso) deixou de existir. V2 e V3 agora diferem só na VGG.
 
-**Opções para a rodada seguinte:** (a) manter como está; (b) adaptativo nos
-dois, isolando o D; (c) fixo nos dois, com um peso para o `patch_sn` estimado
-a partir do `adv_weight_efetivo` que esta rodada registrar.
-
-**Recomendação:** decidir depois de ver o `adv_weight_efetivo` e o `grad_adv`
-do V3 nesta rodada. Se o V3 for o melhor, (b) é o experimento que separa as
-duas causas.
+**O que reabriria:** um D local que de fato aprenda (ex.: PatchGAN sem norma
+espectral, com BatchNorm/InstanceNorm), testado num ensaio mais longo.
 
 ---
 
