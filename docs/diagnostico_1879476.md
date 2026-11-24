@@ -184,12 +184,12 @@ inteiro.
 
 ## 7. Próxima rodada (confirmada em 16/11/2026, V3 trocado em 18/11/2026 após os mini-ensaios da §10; implementada em `scripts/rodada_variantes.sh`)
 
-**Estado (18/11/2026):** código pronto e testado no commit `4cff8ec`, empacotado
-em `aprimoramento-imagens-neutrons_4cff8ec.zip` (via `git archive`, então o
-`config.json` da rodada vai registrar esse commit). **Envio ao cluster
-pendente.** Ao receber os resultados, confira em
-`runs/<job>/V0_srresnet/logs/config.json` que `git_commit` é
-`4cff8ec0ffc08322513d8585b8e1e9f6aa7a17ec-archive`.
+**Estado (24/11/2026):** rodada aprovada na reunião de orientação. Código pronto
+e testado no commit `7c04d23`, que acrescenta a medição da faixa da pilha
+(pendência P2), empacotado em `aprimoramento-imagens-neutrons_7c04d23.zip` via
+`git archive`. **Envio ao cluster pendente.** Ao receber os resultados, confira
+em `runs/<job>/V0_srresnet/logs/config.json` que `git_commit` é
+`7c04d233e74fda4aa200ed134e14ecfa40cc9dd9-archive`.
 
 Um único job de 24 h, em duas partes.
 
