@@ -14,6 +14,23 @@ inicial sem justificativa registrada.
 
 ---
 
+## Reunião de orientação de 24/11/2026
+
+| decisão | resultado |
+|---|---|
+| A5. Meta de +5 dB | vale para as radiografias de nêutrons, não para o proxy de raios X; referência e baseline em aberto, aguardando os dados |
+| A6. Região do PSNR | calcular os dois; decidir o principal depois |
+| A7. MSE na fase GAN | manter |
+| A8. Checkpoint da GAN | relatar os dois |
+| A3. Degradação sintética | manter nesta etapa; declarar como limitação |
+| P2. Faixa 0–8300 | medir no job (`scripts/medir_faixa.py`) |
+| Rodada V0–V3 | aprovada como está |
+
+O orientador não questionou as conclusões do diagnóstico e pediu que a rodada
+seja enviada ao cluster.
+
+---
+
 # Parte I — Decisões tomadas
 
 ## D1. Normalização por faixa fixa, não pelo teto do dtype
@@ -142,6 +159,8 @@ capacidade do Discriminador passa a importar.
 
 ## A3. Modelo de degradação — **a questão mais fundamental, e a menos examinada**
 
+**Decisão (reunião de 24/11/2026):** manter a degradação sintética nesta etapa e declará-la como limitação no relatório. O orientador deixou a escolha conosco; trocar agora invalidaria os testes e os ensaios, e não há PSF medida para pôr no lugar.
+
 **Estado atual:** desfoque gaussiano de `kernel_size=3`, seguido de redução
 bicúbica 4× com antialiasing `[herdado]`
 
@@ -206,6 +225,8 @@ acesso ao Avizo ou de uma segmentação equivalente em código.
 
 ## A5. Meta de +5 dB: qual modelo, contra qual baseline — **cabe ao orientador**
 
+**Decisão (reunião de 24/11/2026):** a meta de +5 dB vale para a etapa com **radiografias de nêutrons de baixa resolução**, não para o proxy de raios X atual (`dataset.md`). Nesta etapa, os resultados do proxy são reportados sem a meta, como validação do pipeline. **Ainda em aberto:** a referência para o PSNR nos nêutrons (pares reais de alta e baixa resolução ou degradação sintética) e o baseline. O orientador está buscando os dados de nêutrons.
+
 **Estado atual:** o plano fala em "melhoria mínima de 5 dB" (`utils.calculate_psnr`),
 sem dizer de qual modelo nem sobre o quê.
 
@@ -236,6 +257,8 @@ números da próxima rodada.
 
 ## A6. Região do cálculo de PSNR e SSIM
 
+**Decisão (reunião de 24/11/2026):** calcular os dois (recorte inteiro e círculo de reconstrução) e decidir o principal depois de ver os resultados. A rodada já calcula os dois (`psnr` e `psnr_fov` no relatório final).
+
 **Estado atual:** sobre o recorte inteiro, incluindo o fundo fora do círculo de
 reconstrução (até 50% do recorte, por `--min-nonzero 0.5`).
 
@@ -253,6 +276,8 @@ legítimo porque o fundo é zero por definição da reconstrução.
 
 ## A7. Manter a MSE de pixel durante a fase GAN
 
+**Decisão (reunião de 24/11/2026):** manter a MSE. Já é o que a rodada faz em V1–V3. O relatório declara o desvio em relação ao SRGAN original; o SRGAN puro (VGG + adversarial, sem MSE) tem como referência o job 1879476.
+
 **Estado atual:** na fase GAN a perda de conteúdo é **só** VGG; a MSE sai.
 É o protocolo de Ledig et al. (2017).
 
@@ -268,6 +293,8 @@ dito no relatório. Mas sem a âncora de pixel o PSNR cai abaixo da bicúbica, e
 trabalho perde a comparação que pretende fazer.
 
 ## A8. Critério de escolha do checkpoint da fase GAN
+
+**Decisão (reunião de 24/11/2026):** relatar os dois (`best.pth` pelo PSNR de validação e o último). A rodada já avalia os dois.
 
 **Estado atual:** não existe `best.pth`; a próxima rodada vai salvar o melhor
 por `val_psnr`.
@@ -329,6 +356,8 @@ de pixels.
 **Bloqueia:** A3 (medir a PSF real) e A4 (MTF como métrica primária).
 
 ## P2. Máximo global da pilha
+
+**Decisão (reunião de 24/11/2026):** medir dentro do job, sem mudar a normalização. `scripts/medir_faixa.py` lê a pilha inteira logo depois da cópia dos dados e grava `runs/<job>/ambiente/faixa_pilha.json` (máximo global, percentis e fração de pixels acima de 8300). Nas 3 fatias locais o máximo é 8297, a 3 níveis do teto: é provável que a pilha completa o ultrapasse em algum ponto. Se ultrapassar, os números da rodada continuam comparáveis entre si, mas o corte entra como ressalva no relatório.
 
 `--tiff-range 0 8300` vem de três fatias consecutivas do fim da aquisição.
 

@@ -200,6 +200,24 @@ class TestUnidades(Base):
                            cwd=destino, capture_output=True, text=True)
         self.assertEqual(r.stdout.strip(), commit + "-archive", r.stderr)
 
+    def test_medir_faixa(self):
+        """Mede máximo e fração cortada; com teto baixo, acusa o corte."""
+        saida = os.path.join(self.tmp, "faixa.json")
+        r = subprocess.run([PY, "scripts/medir_faixa.py", self.dados, saida, "--teto", "4000"],
+                           cwd=REPO, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(saida) as f:
+            faixa = json.load(f)
+        # conferência independente com numpy
+        maximo = max(int(tifffile.imread(os.path.join(self.dados, n)).max())
+                     for n in os.listdir(self.dados))
+        acima = sum(int((tifffile.imread(os.path.join(self.dados, n)) > 4000).sum())
+                    for n in os.listdir(self.dados))
+        self.assertEqual(faixa["maximo_global"], maximo)
+        self.assertEqual(faixa["pixels_acima_do_teto"], acima)
+        self.assertGreater(acima, 0)
+        self.assertIn("AVISO", r.stdout)
+
     def test_avaliacao_recusa_configs_diferentes(self):
         """Dois Geradores treinados com divisões diferentes não vão à mesma tabela."""
         from src.model import Generator
@@ -403,6 +421,7 @@ class TestSlurm(Base):
         res = os.path.join(proj, "runs", job)
         for item in ("V0_srresnet/weights/best.pth", "V3_srgan_mse/weights/best.pth",
                      "avaliacao/relatorio_final.txt", "ambiente/pip_freeze.txt",
+                     "ambiente/faixa_pilha.json",
                      "estado_fases.txt"):
             self.assertTrue(os.path.exists(os.path.join(res, item)), item)
         with open(os.path.join(res, "V0_srresnet", "logs", "config.json")) as f:

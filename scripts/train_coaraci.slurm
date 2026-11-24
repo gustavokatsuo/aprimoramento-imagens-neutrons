@@ -135,6 +135,13 @@ if (( N_BORDAS == 0 )); then
     python scripts/gerar_phantoms.py --saida "${TRABALHO}/data/step_edges"
 fi
 
+# Faixa de valores da pilha completa (pendência P2 em docs/decisoes.md): o
+# teto 0-8300 do treino veio de só 3 fatias. Só mede e registra; não muda a
+# normalização. Uma falha aqui não impede o treino.
+mkdir -p "${TRABALHO}/run/ambiente"
+python scripts/medir_faixa.py "${TRABALHO}/data/raw" "${TRABALHO}/run/ambiente/faixa_pilha.json" \
+    --teto 8300 || echo "AVISO: não foi possível medir a faixa da pilha (o treino segue)"
+
 # --- Procedência do código -------------------------------------------------------
 if git -C "${PROJETO}" rev-parse HEAD >/dev/null 2>&1; then
     echo "Código: clone git, commit $(git -C "${PROJETO}" rev-parse HEAD)"
